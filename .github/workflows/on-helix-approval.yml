@@ -1,0 +1,384 @@
+# =============================================================================
+# Helix-Processor: Webhook receiver for Helix ITSM approvals
+# =============================================================================
+# This workflow is triggered when Helix ITSM approves/rejects a CRQ.
+# Helix sends a webhook (repository_dispatch) with the CRQ status.
+#
+# For testing/simulation, use:
+#   gh api repos/OWNER/REPO/dispatches \
+#     -f event_type=helix-approval \
+#     -f client_payload='{"crq_id":"CRQ-123","status":"APPROVED","request_id":"REQ-xxx"}'
+# =============================================================================
+name: On Helix Approval
+
+on:
+  repository_dispatch:
+    types: [helix-approval]
+
+env:
+  CONFIG_FILE: repo-config.yaml
+  MAX_VERSIONS: "4"
+  MAX_REVISIONS: "4"
+
+# Permissions required for managing Issues and downloading artifacts
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  process-approval:
+    name: "Process Helix ${{ github.event.client_payload.status }}: ${{ github.event.client_payload.crq_id }}"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Helix-Processor
+        uses: actions/checkout@v4
+
+      - name: Validate Webhook Payload
+        id: validate
+        run: |
+          CRQ_ID="${{ github.event.client_payload.crq_id }}"
+          STATUS="${{ github.event.client_payload.status }}"
+          REQUEST_ID="${{ github.event.client_payload.request_id }}"
+
+          echo "=========================================="
+          echo "  Helix Webhook Received"
+          echo "=========================================="
+          echo "CRQ ID:     ${CRQ_ID}"
+          echo "Status:     ${STATUS}"
+          echo "Request ID: ${REQUEST_ID}"
+          echo "=========================================="
+
+          if [ -z "$CRQ_ID" ] || [ -z "$STATUS" ] || [ -z "$REQUEST_ID" ]; then
+            echo "ERROR: Missing required fields in webhook payload"
+            echo "Required: crq_id, status, request_id"
+            exit 1
+          fi
+
+          # Validate status
+          if [ "$STATUS" != "APPROVED" ] && [ "$STATUS" != "REJECTED" ]; then
+            echo "ERROR: Invalid status. Must be APPROVED or REJECTED"
+            exit 1
+          fi
+
+          echo "crq_id=${CRQ_ID}" >> $GITHUB_OUTPUT
+          echo "status=${STATUS}" >> $GITHUB_OUTPUT
+          echo "request_id=${REQUEST_ID}" >> $GITHUB_OUTPUT
+
+      - name: Find Pending Request
+        id: find-request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REQUEST_ID="${{ steps.validate.outputs.request_id }}"
+
+          echo "Searching for pending request: ${REQUEST_ID}"
+
+          # Find the issue with this request ID
+          ISSUE=$(gh issue list \
+            --label "pending-helix" \
+            --search "${REQUEST_ID} in:title" \
+            --json number,title,body \
+            --jq '.[0]')
+
+          if [ -z "$ISSUE" ] || [ "$ISSUE" == "null" ]; then
+            echo "ERROR: No pending request found for ${REQUEST_ID}"
+            echo "The request may have already been processed or does not exist"
+            exit 1
+          fi
+
+          ISSUE_NUMBER=$(echo "$ISSUE" | jq -r '.number')
+          ISSUE_BODY=$(echo "$ISSUE" | jq -r '.body')
+
+          echo "Found Issue #${ISSUE_NUMBER}"
+
+          # Extract metadata from issue body (YAML format)
+          API_NAME=$(echo "$ISSUE_BODY" | grep "^api_name:" | cut -d: -f2 | tr -d ' ')
+          API_VERSION=$(echo "$ISSUE_BODY" | grep "^api_version:" | cut -d: -f2 | tr -d ' ')
+          SUBDOMINIO=$(echo "$ISSUE_BODY" | grep "^subdominio:" | cut -d: -f2 | tr -d ' ')
+          REVISION_ID=$(echo "$ISSUE_BODY" | grep "^revision_id:" | cut -d: -f2 | tr -d ' ')
+          USER_ID=$(echo "$ISSUE_BODY" | grep "^user_id:" | cut -d: -f2 | tr -d ' ')
+          BACKEND_URL=$(echo "$ISSUE_BODY" | grep "^backend_url:" | cut -d: -f2- | tr -d ' ')
+          API_CONTEXT=$(echo "$ISSUE_BODY" | grep "^api_context:" | cut -d: -f2 | tr -d ' ')
+
+          echo ""
+          echo "Request Details:"
+          echo "  API: ${API_NAME} v${API_VERSION}"
+          echo "  Revision: ${REVISION_ID}"
+          echo "  Subdominio: ${SUBDOMINIO}"
+          echo "  User: ${USER_ID}"
+
+          echo "issue_number=${ISSUE_NUMBER}" >> $GITHUB_OUTPUT
+          echo "api_name=${API_NAME}" >> $GITHUB_OUTPUT
+          echo "api_version=${API_VERSION}" >> $GITHUB_OUTPUT
+          echo "subdominio=${SUBDOMINIO}" >> $GITHUB_OUTPUT
+          echo "revision_id=${REVISION_ID}" >> $GITHUB_OUTPUT
+          echo "user_id=${USER_ID}" >> $GITHUB_OUTPUT
+          echo "backend_url=${BACKEND_URL}" >> $GITHUB_OUTPUT
+          echo "api_context=${API_CONTEXT}" >> $GITHUB_OUTPUT
+
+      - name: Handle Rejection
+        if: steps.validate.outputs.status == 'REJECTED'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ steps.find-request.outputs.issue_number }}"
+          CRQ_ID="${{ steps.validate.outputs.crq_id }}"
+          API_NAME="${{ steps.find-request.outputs.api_name }}"
+          API_VERSION="${{ steps.find-request.outputs.api_version }}"
+
+          echo "=========================================="
+          echo "  CRQ REJECTED"
+          echo "=========================================="
+
+          # Close the issue with rejection comment
+          gh issue close "${ISSUE_NUMBER}" \
+            --comment "## CRQ Rejected
+
+          | Campo | Valor |
+          |-------|-------|
+          | CRQ | ${CRQ_ID} |
+          | API | ${API_NAME} v${API_VERSION} |
+          | Status | **REJECTED** |
+
+          La solicitud de registro en UAT ha sido rechazada por Helix ITSM.
+          El solicitante debe revisar los motivos del rechazo y volver a intentar si corresponde."
+
+          # Update labels
+          gh issue edit "${ISSUE_NUMBER}" \
+            --remove-label "pending-helix" \
+            --add-label "rejected"
+
+          echo "Issue #${ISSUE_NUMBER} closed as rejected"
+
+      - name: Load Repo Config
+        if: steps.validate.outputs.status == 'APPROVED'
+        id: config
+        run: |
+          SUBDOMINIO="${{ steps.find-request.outputs.subdominio }}"
+
+          if [ ! -f "${{ env.CONFIG_FILE }}" ]; then
+            echo "ERROR: Config file not found: ${{ env.CONFIG_FILE }}"
+            exit 1
+          fi
+
+          # Find git_repo for this subdominio
+          GIT_REPO=$(grep -A5 "^  ${SUBDOMINIO}:" "${{ env.CONFIG_FILE }}" | grep "git_repo:" | head -1 | awk '{print $2}')
+
+          if [ -z "$GIT_REPO" ]; then
+            echo "ERROR: Subdominio '${SUBDOMINIO}' not found in config"
+            exit 1
+          fi
+
+          echo "Target repo: ${GIT_REPO}"
+          echo "git_repo=${GIT_REPO}" >> $GITHUB_OUTPUT
+
+      - name: Download API Export
+        if: steps.validate.outputs.status == 'APPROVED'
+        id: download
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REQUEST_ID="${{ steps.validate.outputs.request_id }}"
+
+          # Download the artifact from the original workflow run
+          # The artifact was saved with the request ID as name
+          mkdir -p ./api-export
+
+          # Try to download artifact
+          ARTIFACT_NAME="api-export-${REQUEST_ID}"
+
+          echo "Downloading artifact: ${ARTIFACT_NAME}"
+
+          # List artifacts and find the one matching our request
+          gh run list --workflow "process-api-request.yml" --limit 20 --json databaseId,name | jq -r '.[].databaseId' | while read RUN_ID; do
+            if gh run download "${RUN_ID}" --name "${ARTIFACT_NAME}" --dir ./api-export 2>/dev/null; then
+              echo "Downloaded from run ${RUN_ID}"
+              break
+            fi
+          done
+
+          if [ -z "$(ls -A ./api-export 2>/dev/null)" ]; then
+            echo "WARNING: Could not download artifact, will create minimal structure"
+            echo "artifact_found=false" >> $GITHUB_OUTPUT
+          else
+            echo "artifact_found=true" >> $GITHUB_OUTPUT
+            ls -la ./api-export/
+          fi
+
+      - name: Create PR in Subdominio Repo
+        if: steps.validate.outputs.status == 'APPROVED'
+        env:
+          GH_TOKEN: ${{ secrets.SUBDOMINIO_PAT }}
+        run: |
+          API_NAME="${{ steps.find-request.outputs.api_name }}"
+          API_VERSION="${{ steps.find-request.outputs.api_version }}"
+          REVISION_ID="${{ steps.find-request.outputs.revision_id }}"
+          TARGET_REPO="${{ steps.config.outputs.git_repo }}"
+          CRQ_ID="${{ steps.validate.outputs.crq_id }}"
+          USER_ID="${{ steps.find-request.outputs.user_id }}"
+          SUBDOMINIO="${{ steps.find-request.outputs.subdominio }}"
+          REQUEST_ID="${{ steps.validate.outputs.request_id }}"
+
+          # Extract short unique suffix from requestId (last part after last dash)
+          # REQ-accounta-68973-a1b2 -> a1b2
+          REQ_SUFFIX=$(echo "${REQUEST_ID}" | rev | cut -d'-' -f1 | rev)
+
+          # Include request suffix to guarantee unique branch names
+          BRANCH_NAME="api/${API_NAME}-${API_VERSION}-${REVISION_ID}-${REQ_SUFFIX}"
+
+          echo "Creating PR in ${TARGET_REPO}"
+          echo "API: ${API_NAME} v${API_VERSION}"
+          echo "Branch: ${BRANCH_NAME}"
+
+          # Clone target repo
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" target-repo
+          cd target-repo
+
+          # Configure git
+          git config user.name "Helix-Processor Bot"
+          git config user.email "helix-processor@github.actions"
+
+          # Check if this exact branch already exists (same requestId = duplicate request)
+          if git ls-remote --exit-code --heads origin "${BRANCH_NAME}" > /dev/null 2>&1; then
+            echo "Branch ${BRANCH_NAME} already exists (duplicate request)"
+            EXISTING_PR=$(gh pr list --repo "${TARGET_REPO}" --head "${BRANCH_NAME}" --state all --json number,state --jq '.[0] | "\(.number) (\(.state))"')
+            if [ -n "$EXISTING_PR" ]; then
+              echo "PR ${EXISTING_PR} already exists for this exact request - skipping duplicate"
+              exit 0
+            fi
+            # Branch exists but no PR - safe to delete and recreate
+            git push origin --delete "${BRANCH_NAME}" || true
+          fi
+
+          # Create branch
+          git checkout -b "${BRANCH_NAME}"
+
+          # Define paths
+          API_PATH="apis/${API_NAME}"
+          VERSION_PATH="${API_PATH}/${API_VERSION}"
+          REVISION_PATH="${VERSION_PATH}/revisions/${REVISION_ID}"
+
+          # Create structure
+          mkdir -p "${REVISION_PATH}"
+
+          # Copy files if artifact was downloaded
+          if [ -d "../api-export" ] && [ -n "$(ls -A ../api-export 2>/dev/null)" ]; then
+            cp -r ../api-export/* "${REVISION_PATH}/"
+          fi
+
+          # Create/update request.yaml
+          cat > "${REVISION_PATH}/request.yaml" << EOF
+          revision_id: ${REVISION_ID}
+          timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          subdominio: ${SUBDOMINIO}
+          helix_crq: ${CRQ_ID}
+          helix_status: APPROVED
+          request_id: ${REQUEST_ID}
+          api:
+            name: ${API_NAME}
+            version: ${API_VERSION}
+          user: ${USER_ID}
+          approval_workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+          # Commit
+          git add .
+          COMMIT_MSG="feat(${API_NAME}): v${API_VERSION} ${REVISION_ID} - Helix Approved [${CRQ_ID}]"
+          git commit -m "${COMMIT_MSG}" || echo "No changes to commit"
+
+          # Push
+          git push origin "${BRANCH_NAME}"
+
+          # Create PR
+          PR_TITLE="UAT [${SUBDOMINIO}]: ${API_NAME} v${API_VERSION} - ${REVISION_ID} [APPROVED]"
+
+          PR_URL=$(gh pr create \
+            --repo "${TARGET_REPO}" \
+            --base "main" \
+            --head "${BRANCH_NAME}" \
+            --title "${PR_TITLE}" \
+            --body "$(cat <<EOF
+          ## API Registration - Helix APPROVED
+
+          | Campo | Valor |
+          |-------|-------|
+          | API | ${API_NAME} |
+          | Version | ${API_VERSION} |
+          | Revision | ${REVISION_ID} |
+          | Subdominio | ${SUBDOMINIO} |
+          | Helix CRQ | ${CRQ_ID} |
+          | Estado | **APPROVED** |
+          | Solicitante | ${USER_ID} |
+          | Request ID | ${REQUEST_ID} |
+
+          ### Trazabilidad
+          - Approval workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ---
+          Aprobado por Helix ITSM - Auto-merged by Helix-Processor
+          EOF
+          )")
+
+          echo "PR created: ${PR_URL}"
+
+          # Merge inmediato (Helix ya aprobó, no requiere otra revisión humana)
+          echo "Merging PR..."
+          if gh pr merge "${BRANCH_NAME}" --repo "${TARGET_REPO}" --squash --delete-branch; then
+            echo "pr_merged=true" >> $GITHUB_OUTPUT
+            echo ""
+            echo "=========================================="
+            echo "  SUCCESS - PR Created and Merged"
+            echo "  PR: ${PR_URL}"
+            echo "=========================================="
+          else
+            echo "pr_merged=false" >> $GITHUB_OUTPUT
+            echo ""
+            echo "=========================================="
+            echo "  WARNING - PR Created but merge failed"
+            echo "  PR: ${PR_URL}"
+            echo "  Manual merge may be required"
+            echo "=========================================="
+          fi
+
+      - name: Close Issue as Approved
+        if: steps.validate.outputs.status == 'APPROVED'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ steps.find-request.outputs.issue_number }}"
+          CRQ_ID="${{ steps.validate.outputs.crq_id }}"
+          API_NAME="${{ steps.find-request.outputs.api_name }}"
+          API_VERSION="${{ steps.find-request.outputs.api_version }}"
+
+          # Close issue with success comment
+          gh issue close "${ISSUE_NUMBER}" \
+            --comment "## CRQ Approved and Processed
+
+          | Campo | Valor |
+          |-------|-------|
+          | CRQ | ${CRQ_ID} |
+          | API | ${API_NAME} v${API_VERSION} |
+          | Status | **APPROVED** |
+
+          La API ha sido registrada exitosamente en el repositorio del subdominio.
+          PR creada y auto-merged."
+
+          # Update labels
+          gh issue edit "${ISSUE_NUMBER}" \
+            --remove-label "pending-helix" \
+            --add-label "approved"
+
+          echo "Issue #${ISSUE_NUMBER} closed as approved"
+
+      - name: Summary
+        run: |
+          echo "## Helix Approval Processed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| CRQ | ${{ steps.validate.outputs.crq_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ steps.validate.outputs.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Request ID | ${{ steps.validate.outputs.request_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| API | ${{ steps.find-request.outputs.api_name }} v${{ steps.find-request.outputs.api_version }} |" >> $GITHUB_STEP_SUMMARY

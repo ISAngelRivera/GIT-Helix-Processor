@@ -1,0 +1,25 @@
+# =============================================================================
+# GIT-Helix-Processor: Configuración de Subdominios
+# =============================================================================
+# Motor central vendor-agnostic para procesamiento de APIs.
+# Mapea subdominios a sus repositorios de almacenamiento.
+# =============================================================================
+
+subdominios:
+  finanzas-pagos:
+    description: "APIs del dominio de Finanzas y Pagos"
+    git_repo: "ISAngelRivera/Finanzas-Pagos"
+    owners:
+      - "team-finanzas@company.com"
+
+  rrhh-empleados:
+    description: "APIs del dominio de RRHH y Empleados"
+    git_repo: "ISAngelRivera/RRHH-Empleados"
+    owners:
+      - "team-rrhh@company.com"
+
+  informatica-devops:
+    description: "APIs del dominio de Informatica y DevOps"
+    git_repo: "ISAngelRivera/Informatica-DevOps"
+    owners:
+      - "team-devops@company.com"

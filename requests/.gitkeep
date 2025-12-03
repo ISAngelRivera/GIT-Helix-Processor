@@ -1,0 +1,6 @@
+# This directory receives PRs from vendor processors
+# Each request is a subdirectory with:
+# - request.yaml (metadata)
+# - api.yaml (API definition)
+# - swagger.yaml (OpenAPI spec)
+# - params.yaml (environment config)
