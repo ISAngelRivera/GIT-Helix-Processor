@@ -1,0 +1,12 @@
+action: register-uat
+request_id: 2025-12-04-inventoryapi-v2-0-0-uat
+timestamp: 2025-12-04T12:54:35.706Z
+subdomain: rrhh-empleados
+backend_url: https://api.domain-b.com/inventory
+api:
+  id: d73c11b9-51f2-4ae1-b159-86cc0f935fd7
+  name: InventoryAPI
+  version: 2.0.0
+  context: /inventory
+user: current-user
+run_url: https://github.com/ISAngelRivera/WSO2-Processor/actions/runs/19929686455
