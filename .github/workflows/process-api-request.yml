@@ -1,0 +1,261 @@
+# =============================================================================
+# GIT-Helix-Processor: Motor Central de Procesamiento de APIs
+# =============================================================================
+# Vendor-agnostic: recibe datos de cualquier API Manager (WSO2, Apigee, Kong...)
+# 1. Valida subdominio existe
+# 2. Ejecuta linters (futuro)
+# 3. Crea CRQ en Helix (futuro)
+# 4. Si OK -> Crea PR auto-merge en repo del subdominio
+# =============================================================================
+name: Process API Request
+
+on:
+  workflow_dispatch:
+    inputs:
+      subdominio:
+        description: 'Subdominio de la API'
+        required: true
+        type: string
+      apiName:
+        description: 'Nombre de la API'
+        required: true
+        type: string
+      apiVersion:
+        description: 'Version de la API'
+        required: true
+        type: string
+      apiContext:
+        description: 'Context path de la API'
+        required: false
+        type: string
+        default: ''
+      backendUrl:
+        description: 'URL del backend'
+        required: false
+        type: string
+        default: ''
+      apiJson:
+        description: 'Contenido de api.json (base64)'
+        required: true
+        type: string
+      swaggerJson:
+        description: 'Contenido de swagger.json (base64)'
+        required: true
+        type: string
+      sourceSystem:
+        description: 'Sistema origen (wso2, apigee, kong...)'
+        required: false
+        type: string
+        default: 'wso2'
+      userId:
+        description: 'Usuario solicitante'
+        required: false
+        type: string
+        default: 'unknown'
+      sourceRunUrl:
+        description: 'URL del workflow origen'
+        required: false
+        type: string
+        default: ''
+
+env:
+  CONFIG_FILE: repo-config.yaml
+
+jobs:
+  process-request:
+    name: Process API Registration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Helix-Processor
+        uses: actions/checkout@v4
+
+      - name: Log Request
+        run: |
+          echo "=========================================="
+          echo "  API Registration Request"
+          echo "=========================================="
+          echo "Subdominio:  ${{ inputs.subdominio }}"
+          echo "API:         ${{ inputs.apiName }} v${{ inputs.apiVersion }}"
+          echo "Context:     ${{ inputs.apiContext }}"
+          echo "Source:      ${{ inputs.sourceSystem }}"
+          echo "User:        ${{ inputs.userId }}"
+          echo "=========================================="
+
+      - name: Generate Request ID
+        id: request-id
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          API_SLUG=$(echo "${{ inputs.apiName }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
+          VER_SLUG=$(echo "${{ inputs.apiVersion }}" | tr '.' '-')
+          REQUEST_ID="${DATE}-${API_SLUG}-v${VER_SLUG}"
+          echo "request_id=${REQUEST_ID}" >> $GITHUB_OUTPUT
+          echo "Request ID: ${REQUEST_ID}"
+
+      - name: Validate Subdominio Exists
+        id: validate
+        run: |
+          SUBDOMINIO="${{ inputs.subdominio }}"
+
+          if ! grep -q "^  ${SUBDOMINIO}:" ${{ env.CONFIG_FILE }}; then
+            echo "=========================================="
+            echo "  ERROR: Subdominio '$SUBDOMINIO' no existe"
+            echo "=========================================="
+            echo ""
+            echo "Subdominios disponibles:"
+            grep -E "^  [a-z]" ${{ env.CONFIG_FILE }} | grep ":" | sed 's/://g' | sed 's/^ */  - /'
+            echo ""
+            exit 1
+          fi
+
+          # Extraer git_repo del subdominio
+          GIT_REPO=$(awk "/^  ${SUBDOMINIO}:/{found=1} found && /git_repo:/{print \$2; exit}" ${{ env.CONFIG_FILE }} | tr -d '"')
+
+          if [ -z "$GIT_REPO" ]; then
+            echo "ERROR: No se encontro git_repo para subdominio '$SUBDOMINIO'"
+            exit 1
+          fi
+
+          echo "Subdominio validado: $SUBDOMINIO"
+          echo "Target repo: $GIT_REPO"
+          echo "git_repo=${GIT_REPO}" >> $GITHUB_OUTPUT
+
+      # =========================================
+      # FUTURO: Linters (Spectral, etc.)
+      # =========================================
+      - name: Run Linters
+        run: |
+          echo "TODO: Ejecutar linters (Spectral, validaciones de seguridad...)"
+          echo "Por ahora: SKIP"
+
+      # =========================================
+      # FUTURO: Crear CRQ en Helix
+      # =========================================
+      - name: Create Helix CRQ
+        id: helix
+        run: |
+          echo "TODO: Crear CRQ en Helix ITSM"
+          echo "Por ahora: Simulando CRQ aprobado"
+          CRQ_ID="CRQ-MOCK-$(date +%Y%m%d%H%M%S)"
+          echo "crq_id=${CRQ_ID}" >> $GITHUB_OUTPUT
+          echo "CRQ simulado: ${CRQ_ID}"
+
+      # =========================================
+      # Crear PR en repo del subdominio (auto-merge)
+      # =========================================
+      - name: Prepare API Files
+        run: |
+          REQUEST_ID="${{ steps.request-id.outputs.request_id }}"
+          mkdir -p "./api-files"
+
+          # Decodificar archivos base64
+          echo "${{ inputs.apiJson }}" | base64 -d > ./api-files/api.json
+          echo "${{ inputs.swaggerJson }}" | base64 -d > ./api-files/swagger.json
+
+          # Crear request.yaml con metadata
+          cat > ./api-files/request.yaml << EOF
+          request_id: ${REQUEST_ID}
+          timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          subdominio: ${{ inputs.subdominio }}
+          source_system: ${{ inputs.sourceSystem }}
+          helix_crq: ${{ steps.helix.outputs.crq_id }}
+          api:
+            name: ${{ inputs.apiName }}
+            version: ${{ inputs.apiVersion }}
+            context: ${{ inputs.apiContext }}
+            backend_url: ${{ inputs.backendUrl }}
+          user: ${{ inputs.userId }}
+          source_run: ${{ inputs.sourceRunUrl }}
+          processor_run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+          echo "Files prepared:"
+          ls -la ./api-files/
+
+      - name: Create PR in Subdominio Repo
+        env:
+          GH_TOKEN: ${{ secrets.SUBDOMINIO_PAT }}
+        run: |
+          REQUEST_ID="${{ steps.request-id.outputs.request_id }}"
+          TARGET_REPO="${{ steps.validate.outputs.git_repo }}"
+          BRANCH_NAME="api/${REQUEST_ID}"
+          CRQ_ID="${{ steps.helix.outputs.crq_id }}"
+
+          echo "Creating PR in ${TARGET_REPO}"
+
+          # Clonar repo destino
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" target-repo
+          cd target-repo
+
+          # Configurar git
+          git config user.name "Helix-Processor Bot"
+          git config user.email "helix-processor@github.actions"
+
+          # Crear rama
+          git checkout -b "${BRANCH_NAME}"
+
+          # Crear estructura y copiar archivos
+          mkdir -p "apis/${REQUEST_ID}"
+          cp -r ../api-files/* "apis/${REQUEST_ID}/"
+
+          # Commit
+          git add .
+          git commit -m "feat: ${{ inputs.apiName }} v${{ inputs.apiVersion }} [${CRQ_ID}]"
+
+          # Push
+          git push origin "${BRANCH_NAME}"
+
+          # Crear PR con auto-merge
+          PR_URL=$(gh pr create \
+            --repo "${TARGET_REPO}" \
+            --base "main" \
+            --head "${BRANCH_NAME}" \
+            --title "API: ${{ inputs.apiName }} v${{ inputs.apiVersion }}" \
+            --body "$(cat <<EOF
+          ## API Registration
+
+          | Campo | Valor |
+          |-------|-------|
+          | API | ${{ inputs.apiName }} |
+          | Version | ${{ inputs.apiVersion }} |
+          | Subdominio | ${{ inputs.subdominio }} |
+          | Helix CRQ | ${CRQ_ID} |
+          | Solicitante | ${{ inputs.userId }} |
+          | Sistema | ${{ inputs.sourceSystem }} |
+
+          ### Archivos
+          - api.json
+          - swagger.json
+          - request.yaml
+
+          ### Trazabilidad
+          - Source workflow: ${{ inputs.sourceRunUrl }}
+          - Processor workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ---
+          Auto-merged by Helix-Processor
+          EOF
+          )")
+
+          echo "PR created: ${PR_URL}"
+
+          # Auto-merge (si el repo lo permite)
+          gh pr merge "${BRANCH_NAME}" --repo "${TARGET_REPO}" --auto --squash || echo "Auto-merge no disponible, PR queda abierta"
+
+          echo ""
+          echo "=========================================="
+          echo "  SUCCESS!"
+          echo "  PR: ${PR_URL}"
+          echo "  CRQ: ${CRQ_ID}"
+          echo "=========================================="
+
+      - name: Summary
+        run: |
+          echo "## API Processed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| API | ${{ inputs.apiName }} v${{ inputs.apiVersion }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Subdominio | ${{ inputs.subdominio }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target Repo | ${{ steps.validate.outputs.git_repo }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Helix CRQ | ${{ steps.helix.outputs.crq_id }} |" >> $GITHUB_STEP_SUMMARY
