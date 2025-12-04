@@ -1,0 +1,40 @@
+# =============================================================================
+# GIT-Helix-Processor: Configuración de Subdominios
+# =============================================================================
+# Este archivo mapea los backends de las APIs a sus subdominios correspondientes.
+# Cuando WSO2-Processor recibe una solicitud UAT, consulta este archivo para
+# determinar en qué carpeta colocar los archivos de la API.
+#
+# Formato de patterns:
+#   - Usar * como wildcard (ej: *.finanzas.corp.com)
+#   - Los patterns se evalúan como regex
+# =============================================================================
+
+subdominios:
+  finanzas-pagos:
+    description: "APIs del dominio de Finanzas y Pagos"
+    backend_patterns:
+      - "api.domain-a.com"
+      - "*.finanzas.corp.com"
+      - "payments.internal.com"
+    git_repo: "wso2_git_Finanzas-pagos"
+    owners:
+      - "team-finanzas@company.com"
+    
+  rrhh-empleados:
+    description: "APIs del dominio de RRHH y Empleados"
+    backend_patterns:
+      - "api.domain-b.com"
+      - "*.rrhh.corp.com"
+      - "hr.internal.com"
+    git_repo: "wso2_git_RRHH-empleados"
+    owners:
+      - "team-rrhh@company.com"
+
+  otros:
+    description: "APIs sin subdominio asignado"
+    backend_patterns:
+      - "*"
+    git_repo: "wso2_git_Otros"
+    owners:
+      - "platform-team@company.com"
