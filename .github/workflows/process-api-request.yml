@@ -4,8 +4,9 @@
 # Vendor-agnostic: recibe datos de cualquier API Manager (WSO2, Apigee, Kong...)
 # 1. Valida subdominio existe
 # 2. Ejecuta linters (futuro)
-# 3. Crea CRQ en Helix (futuro)
-# 4. Si OK -> Crea PR auto-merge en repo del subdominio
+# 3. Crea CRQ en Helix
+# 4. SI Helix APRUEBA -> Descomprime export y guarda archivos en repo subdominio
+# 5. Si Helix rechaza -> NO se guarda nada
 # =============================================================================
 name: Process API Request
 
@@ -34,12 +35,8 @@ on:
         required: false
         type: string
         default: ''
-      apiJson:
-        description: 'Contenido de api.json (base64)'
-        required: true
-        type: string
-      swaggerJson:
-        description: 'Contenido de swagger.json (base64)'
+      apiExportZip:
+        description: 'ZIP completo del export de apictl (base64)'
         required: true
         type: string
       sourceSystem:
@@ -120,6 +117,25 @@ jobs:
           echo "Target repo: $GIT_REPO"
           echo "git_repo=${GIT_REPO}" >> $GITHUB_OUTPUT
 
+      - name: Decode and Extract API Export
+        id: extract
+        run: |
+          echo "Decoding API export ZIP..."
+          mkdir -p ./api-export
+
+          # Decodificar el ZIP
+          echo "${{ inputs.apiExportZip }}" | base64 -d > ./api-export/export.zip
+
+          # Descomprimir
+          unzip -q ./api-export/export.zip -d ./api-export/extracted
+
+          # Encontrar directorio de la API
+          API_DIR=$(find ./api-export/extracted -type d -mindepth 1 -maxdepth 1 | head -1)
+          echo "api_dir=${API_DIR}" >> $GITHUB_OUTPUT
+
+          echo "Contenido extraído:"
+          ls -laR "$API_DIR"
+
       # =========================================
       # FUTURO: Linters (Spectral, etc.)
       # =========================================
@@ -129,36 +145,76 @@ jobs:
           echo "Por ahora: SKIP"
 
       # =========================================
-      # FUTURO: Crear CRQ en Helix
+      # Crear CRQ en Helix - PASO CRÍTICO
+      # Solo si se aprueba se guarda el export
       # =========================================
       - name: Create Helix CRQ
         id: helix
         run: |
-          echo "TODO: Crear CRQ en Helix ITSM"
-          echo "Por ahora: Simulando CRQ aprobado"
+          echo "=========================================="
+          echo "  Creando CRQ en Helix ITSM"
+          echo "=========================================="
+
+          # TODO: Integración real con Helix API
+          # Por ahora simulamos la creación y aprobación
+          # En producción aquí se llamaría a la API de Helix
+
+          # Datos para el CRQ:
+          echo "API: ${{ inputs.apiName }} v${{ inputs.apiVersion }}"
+          echo "Subdominio: ${{ inputs.subdominio }}"
+          echo "Backend: ${{ inputs.backendUrl }}"
+          echo "Solicitante: ${{ inputs.userId }}"
+          echo "Sistema origen: ${{ inputs.sourceSystem }}"
+
+          # Simulación de respuesta de Helix
           CRQ_ID="CRQ-MOCK-$(date +%Y%m%d%H%M%S)"
+          CRQ_STATUS="APPROVED"  # En producción: APPROVED, REJECTED, PENDING
+
           echo "crq_id=${CRQ_ID}" >> $GITHUB_OUTPUT
-          echo "CRQ simulado: ${CRQ_ID}"
+          echo "crq_status=${CRQ_STATUS}" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "CRQ creado: ${CRQ_ID}"
+          echo "Estado: ${CRQ_STATUS}"
+
+      - name: Check Helix Approval
+        id: check-approval
+        run: |
+          CRQ_STATUS="${{ steps.helix.outputs.crq_status }}"
+
+          if [ "$CRQ_STATUS" != "APPROVED" ]; then
+            echo "=========================================="
+            echo "  CRQ NO APROBADO - Estado: $CRQ_STATUS"
+            echo "=========================================="
+            echo "No se guardarán los archivos de la API"
+            echo "approved=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "CRQ APROBADO - Procediendo a guardar archivos"
+          echo "approved=true" >> $GITHUB_OUTPUT
 
       # =========================================
-      # Crear PR en repo del subdominio (auto-merge)
+      # SOLO SI HELIX APRUEBA: Guardar en repo subdominio
       # =========================================
-      - name: Prepare API Files
+      - name: Prepare API Files for Storage
+        if: steps.check-approval.outputs.approved == 'true'
         run: |
           REQUEST_ID="${{ steps.request-id.outputs.request_id }}"
+          API_DIR="${{ steps.extract.outputs.api_dir }}"
           mkdir -p "./api-files"
 
-          # Decodificar archivos base64
-          echo "${{ inputs.apiJson }}" | base64 -d > ./api-files/api.json
-          echo "${{ inputs.swaggerJson }}" | base64 -d > ./api-files/swagger.json
+          # Copiar TODOS los archivos del export (descomprimidos)
+          cp -r "$API_DIR"/* ./api-files/
 
-          # Crear request.yaml con metadata
+          # Crear request.yaml con metadata del proceso
           cat > ./api-files/request.yaml << EOF
           request_id: ${REQUEST_ID}
           timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
           subdominio: ${{ inputs.subdominio }}
           source_system: ${{ inputs.sourceSystem }}
           helix_crq: ${{ steps.helix.outputs.crq_id }}
+          helix_status: ${{ steps.helix.outputs.crq_status }}
           api:
             name: ${{ inputs.apiName }}
             version: ${{ inputs.apiVersion }}
@@ -169,10 +225,11 @@ jobs:
           processor_run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
 
-          echo "Files prepared:"
-          ls -la ./api-files/
+          echo "Archivos preparados para guardar:"
+          ls -laR ./api-files/
 
       - name: Create PR in Subdominio Repo
+        if: steps.check-approval.outputs.approved == 'true'
         env:
           GH_TOKEN: ${{ secrets.SUBDOMINIO_PAT }}
         run: |
@@ -194,7 +251,7 @@ jobs:
           # Crear rama
           git checkout -b "${BRANCH_NAME}"
 
-          # Crear estructura y copiar archivos
+          # Crear estructura y copiar TODOS los archivos del export
           mkdir -p "apis/${REQUEST_ID}"
           cp -r ../api-files/* "apis/${REQUEST_ID}/"
 
@@ -205,6 +262,9 @@ jobs:
           # Push
           git push origin "${BRANCH_NAME}"
 
+          # Listar archivos incluidos
+          FILES_LIST=$(find "apis/${REQUEST_ID}" -type f | sed 's|apis/'"${REQUEST_ID}"'/||' | sort | head -20)
+
           # Crear PR con auto-merge
           PR_URL=$(gh pr create \
             --repo "${TARGET_REPO}" \
@@ -212,7 +272,7 @@ jobs:
             --head "${BRANCH_NAME}" \
             --title "API: ${{ inputs.apiName }} v${{ inputs.apiVersion }}" \
             --body "$(cat <<EOF
-          ## API Registration
+          ## API Registration - Helix Approved
 
           | Campo | Valor |
           |-------|-------|
@@ -220,20 +280,21 @@ jobs:
           | Version | ${{ inputs.apiVersion }} |
           | Subdominio | ${{ inputs.subdominio }} |
           | Helix CRQ | ${CRQ_ID} |
+          | Estado Helix | ✅ APPROVED |
           | Solicitante | ${{ inputs.userId }} |
           | Sistema | ${{ inputs.sourceSystem }} |
 
-          ### Archivos
-          - api.json
-          - swagger.json
-          - request.yaml
+          ### Archivos del Export (backup completo)
+          \`\`\`
+          ${FILES_LIST}
+          \`\`\`
 
           ### Trazabilidad
           - Source workflow: ${{ inputs.sourceRunUrl }}
           - Processor workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
           ---
-          Auto-merged by Helix-Processor
+          ✅ Aprobado por Helix ITSM - Auto-merged by Helix-Processor
           EOF
           )")
 
@@ -251,11 +312,18 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## API Processed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "## API Processing Result" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| API | ${{ inputs.apiName }} v${{ inputs.apiVersion }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Subdominio | ${{ inputs.subdominio }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Target Repo | ${{ steps.validate.outputs.git_repo }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Helix CRQ | ${{ steps.helix.outputs.crq_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Estado | ${{ steps.helix.outputs.crq_status }} |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.check-approval.outputs.approved }}" == "true" ]; then
+            echo "| Target Repo | ${{ steps.validate.outputs.git_repo }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Archivos | ✅ Guardados (export completo) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Archivos | ❌ No guardados (CRQ no aprobado) |" >> $GITHUB_STEP_SUMMARY
+          fi
