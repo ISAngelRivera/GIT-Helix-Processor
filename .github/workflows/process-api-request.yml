@@ -82,10 +82,11 @@ jobs:
       - name: Generate Request ID
         id: request-id
         run: |
-          DATE=$(date +%Y-%m-%d)
+          # Usar timestamp completo para evitar conflictos de rama
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           API_SLUG=$(echo "${{ inputs.apiName }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
           VER_SLUG=$(echo "${{ inputs.apiVersion }}" | tr '.' '-')
-          REQUEST_ID="${DATE}-${API_SLUG}-v${VER_SLUG}"
+          REQUEST_ID="${TIMESTAMP}-${API_SLUG}-v${VER_SLUG}"
           echo "request_id=${REQUEST_ID}" >> $GITHUB_OUTPUT
           echo "Request ID: ${REQUEST_ID}"
 
