@@ -1,0 +1,12 @@
+action: register-uat
+request_id: 2025-12-04-analyticsapi-v1-0-0-uat
+timestamp: 2025-12-04T13:55:16.352Z
+subdominio: rrhh-empleados
+backend_url: https://api.domain-b.com/analytics
+api:
+  id: f0d8fed1-0cf1-4d8f-931b-a4e30742d57b
+  name: AnalyticsAPI
+  version: 1.0.0
+  context: /analytics
+user: current-user
+run_url: https://github.com/ISAngelRivera/WSO2-Processor/actions/runs/19931415133
