@@ -23,12 +23,19 @@
 # 5. Ejecuta linters
 # 6. Crea CRQ en Helix
 # 7. SI Helix APRUEBA -> commit y PR
+#
+# ESCALABILIDAD: Usa requestId para correlacion en entornos con 2500+ APIs
 # =============================================================================
 name: Process API Request
 
 on:
   workflow_dispatch:
     inputs:
+      requestId:
+        description: 'Unique Request ID for correlation (REQ-xxx-xxx)'
+        required: false
+        type: string
+        default: ''
       subdominio:
         description: 'Subdominio de la API'
         required: true
