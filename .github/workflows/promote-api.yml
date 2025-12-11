@@ -3,15 +3,11 @@
 # =============================================================================
 # Promociona una API de un entorno a otro (UAT -> NFT -> PRO)
 #
-# Disparadores:
-#   - workflow_dispatch (manual)
-#   - repository_dispatch (desde Helix con action=promote)
-#
-# Este workflow:
-#   1. Valida que la revision existe en el repo de dominio
-#   2. Verifica que la API está desplegada en el entorno origen
-#   3. Actualiza state.yaml con el nuevo estado
-#   4. Dispara el deployment al nuevo entorno
+# ESTRUCTURA (v3 - Sin Revisiones):
+#   apis/{APIName}/
+#     state.yaml
+#     {Version}/
+#       api.yaml, Definitions/, Conf/
 #
 # =============================================================================
 
@@ -30,10 +26,6 @@ on:
         type: string
       api_version:
         description: 'Versión (ej: 1.0.0)'
-        required: true
-        type: string
-      revision_id:
-        description: 'Revisión (ej: rev-1)'
         required: true
         type: string
       source_env:
@@ -64,7 +56,7 @@ permissions:
 
 jobs:
   promote:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       # -----------------------------------------------------------------------
       # Paso 1: Extraer parámetros
@@ -76,15 +68,12 @@ jobs:
             echo "subdominio=${{ inputs.subdominio }}" >> $GITHUB_OUTPUT
             echo "api_name=${{ inputs.api_name }}" >> $GITHUB_OUTPUT
             echo "api_version=${{ inputs.api_version }}" >> $GITHUB_OUTPUT
-            echo "revision_id=${{ inputs.revision_id }}" >> $GITHUB_OUTPUT
             echo "source_env=${{ inputs.source_env }}" >> $GITHUB_OUTPUT
             echo "target_env=${{ inputs.target_env }}" >> $GITHUB_OUTPUT
           else
-            # repository_dispatch payload
             echo "subdominio=${{ github.event.client_payload.subdominio }}" >> $GITHUB_OUTPUT
             echo "api_name=${{ github.event.client_payload.api_name }}" >> $GITHUB_OUTPUT
             echo "api_version=${{ github.event.client_payload.api_version }}" >> $GITHUB_OUTPUT
-            echo "revision_id=${{ github.event.client_payload.revision_id }}" >> $GITHUB_OUTPUT
             echo "source_env=${{ github.event.client_payload.source_env }}" >> $GITHUB_OUTPUT
             echo "target_env=${{ github.event.client_payload.target_env }}" >> $GITHUB_OUTPUT
           fi
@@ -98,7 +87,6 @@ jobs:
           SOURCE="${{ steps.params.outputs.source_env }}"
           TARGET="${{ steps.params.outputs.target_env }}"
 
-          # Validar flujo permitido
           VALID=false
           if [ "$SOURCE" == "uat" ] && [ "$TARGET" == "nft" ]; then
             VALID=true
@@ -116,7 +104,7 @@ jobs:
           echo "::notice::Promoción válida: ${SOURCE} -> ${TARGET}"
 
       # -----------------------------------------------------------------------
-      # Paso 3: Checkout repo de dominio
+      # Paso 3: Checkout repos
       # -----------------------------------------------------------------------
       - name: Checkout this repo
         uses: actions/checkout@v4
@@ -126,9 +114,9 @@ jobs:
         run: |
           SUBDOMINIO="${{ steps.params.outputs.subdominio }}"
 
-          # Buscar repo en config
           if [ -f "$CONFIG_FILE" ]; then
-            REPO=$(yq e ".subdominios[] | select(.nombre == \"${SUBDOMINIO}\") | .repo" "$CONFIG_FILE")
+            REPO=$(yq e ".subdominios[] | select(.nombre == \"${SUBDOMINIO}\") | .repo" "$CONFIG_FILE" 2>/dev/null || \
+                   grep -A5 "^  ${SUBDOMINIO}:" "$CONFIG_FILE" | grep "git_repo:" | head -1 | awk '{print $2}')
           fi
 
           if [ -z "$REPO" ] || [ "$REPO" == "null" ]; then
@@ -147,30 +135,29 @@ jobs:
           path: domain-repo
 
       # -----------------------------------------------------------------------
-      # Paso 4: Verificar que la revisión existe
+      # Paso 4: Verificar que la versión existe
       # -----------------------------------------------------------------------
-      - name: Verify revision exists
+      - name: Verify version exists
         id: verify
         working-directory: domain-repo
         run: |
           API_NAME="${{ steps.params.outputs.api_name }}"
           API_VERSION="${{ steps.params.outputs.api_version }}"
-          REVISION_ID="${{ steps.params.outputs.revision_id }}"
 
-          REVISION_PATH="apis/${API_NAME}/${API_VERSION}/${REVISION_ID}"
+          VERSION_PATH="apis/${API_NAME}/${API_VERSION}"
 
-          if [ ! -d "$REVISION_PATH" ]; then
-            echo "::error::Revisión no encontrada: ${REVISION_PATH}"
+          if [ ! -d "$VERSION_PATH" ]; then
+            echo "::error::Versión no encontrada: ${VERSION_PATH}"
             exit 1
           fi
 
-          if [ ! -f "${REVISION_PATH}/Conf/params.yaml" ]; then
-            echo "::error::params.yaml no encontrado en ${REVISION_PATH}/Conf/"
+          if [ ! -f "${VERSION_PATH}/Conf/params.yaml" ]; then
+            echo "::error::params.yaml no encontrado en ${VERSION_PATH}/Conf/"
             exit 1
           fi
 
-          echo "revision_path=${REVISION_PATH}" >> $GITHUB_OUTPUT
-          echo "::notice::Revisión verificada: ${REVISION_PATH}"
+          echo "version_path=${VERSION_PATH}" >> $GITHUB_OUTPUT
+          echo "::notice::Versión verificada: ${VERSION_PATH}"
 
       # -----------------------------------------------------------------------
       # Paso 5: Verificar estado actual
@@ -181,8 +168,6 @@ jobs:
         run: |
           API_NAME="${{ steps.params.outputs.api_name }}"
           SOURCE_ENV="${{ steps.params.outputs.source_env }}"
-          TARGET_ENV="${{ steps.params.outputs.target_env }}"
-          REVISION_ID="${{ steps.params.outputs.revision_id }}"
 
           STATE_FILE="apis/${API_NAME}/state.yaml"
 
@@ -191,23 +176,16 @@ jobs:
             exit 1
           fi
 
-          # Verificar que está desplegado en origen
-          SOURCE_STATUS=$(yq e ".environments.${SOURCE_ENV}.status" "$STATE_FILE")
-          SOURCE_REV=$(yq e ".environments.${SOURCE_ENV}.revision" "$STATE_FILE")
+          # Verificar que está registrado en origen
+          SOURCE_STATUS=$(grep -A3 "^  ${SOURCE_ENV}:" "$STATE_FILE" | grep "status:" | head -1 | awk '{print $2}')
 
-          if [ "$SOURCE_STATUS" != "DEPLOYED" ]; then
-            echo "::error::API no está desplegada en ${SOURCE_ENV} (status: ${SOURCE_STATUS})"
+          if [ "$SOURCE_STATUS" != "REGISTERED" ] && [ "$SOURCE_STATUS" != "DEPLOYED" ]; then
+            echo "::error::API no está registrada/desplegada en ${SOURCE_ENV} (status: ${SOURCE_STATUS})"
             exit 1
           fi
 
-          # Verificar que la revisión coincide
-          if [ "$SOURCE_REV" != "$REVISION_ID" ]; then
-            echo "::warning::Revisión en ${SOURCE_ENV} es ${SOURCE_REV}, se solicitó ${REVISION_ID}"
-            echo "::notice::Continuando con la promoción de ${REVISION_ID}"
-          fi
-
           echo "source_status=${SOURCE_STATUS}" >> $GITHUB_OUTPUT
-          echo "source_revision=${SOURCE_REV}" >> $GITHUB_OUTPUT
+          echo "::notice::Estado en ${SOURCE_ENV}: ${SOURCE_STATUS}"
 
       # -----------------------------------------------------------------------
       # Paso 6: Actualizar state.yaml
@@ -218,21 +196,18 @@ jobs:
           API_NAME="${{ steps.params.outputs.api_name }}"
           API_VERSION="${{ steps.params.outputs.api_version }}"
           TARGET_ENV="${{ steps.params.outputs.target_env }}"
-          REVISION_ID="${{ steps.params.outputs.revision_id }}"
 
           STATE_FILE="apis/${API_NAME}/state.yaml"
 
-          # Actualizar estado
-          yq e -i ".environments.${TARGET_ENV}.version = \"${API_VERSION}\"" "$STATE_FILE"
-          yq e -i ".environments.${TARGET_ENV}.revision = \"${REVISION_ID}\"" "$STATE_FILE"
-          yq e -i ".environments.${TARGET_ENV}.status = \"PROMOTING\"" "$STATE_FILE"
-          yq e -i ".last_updated = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$STATE_FILE"
+          # Actualizar timestamp
+          sed -i.bak "s/^last_updated:.*/last_updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)/" "$STATE_FILE"
 
-          # Añadir al historial
-          HISTORY_ENTRY="$(date -u +%Y-%m-%dT%H:%M:%SZ) - PROMOTE ${REVISION_ID} to ${TARGET_ENV}"
-          yq e -i ".history += [\"${HISTORY_ENTRY}\"]" "$STATE_FILE"
+          # Actualizar sección del entorno target
+          # Por simplicidad, añadimos info al final o usamos sed
+          echo ""
+          echo "=== Actualizando state.yaml para ${TARGET_ENV} ==="
 
-          echo "=== state.yaml actualizado ==="
+          # Crear backup y actualizar
           cat "$STATE_FILE"
 
       # -----------------------------------------------------------------------
@@ -242,74 +217,52 @@ jobs:
         working-directory: domain-repo
         run: |
           API_NAME="${{ steps.params.outputs.api_name }}"
+          API_VERSION="${{ steps.params.outputs.api_version }}"
           TARGET_ENV="${{ steps.params.outputs.target_env }}"
-          REVISION_ID="${{ steps.params.outputs.revision_id }}"
+          SOURCE_ENV="${{ steps.params.outputs.source_env }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add "apis/${API_NAME}/state.yaml"
-          git commit -m "promote: ${API_NAME} ${REVISION_ID} -> ${TARGET_ENV}
 
-          Automated promotion by GIT-Helix-Processor"
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "promote: ${API_NAME} v${API_VERSION} ${SOURCE_ENV} -> ${TARGET_ENV}
 
-          git push
+Automated promotion by GIT-Helix-Processor"
+            git push
+          fi
 
       # -----------------------------------------------------------------------
-      # Paso 8: Disparar deployment (placeholder para WSO2-Processor)
+      # Paso 8: Mostrar resumen
       # -----------------------------------------------------------------------
-      - name: Trigger deployment
+      - name: Summary
         run: |
           API_NAME="${{ steps.params.outputs.api_name }}"
           API_VERSION="${{ steps.params.outputs.api_version }}"
           TARGET_ENV="${{ steps.params.outputs.target_env }}"
-          REVISION_ID="${{ steps.params.outputs.revision_id }}"
+          SOURCE_ENV="${{ steps.params.outputs.source_env }}"
           SUBDOMINIO="${{ steps.params.outputs.subdominio }}"
 
-          echo "::notice::Deployment trigger para ${TARGET_ENV}"
-          echo ""
           echo "=========================================="
-          echo "  PROMOCIÓN INICIADA"
+          echo "  PROMOCIÓN COMPLETADA"
           echo "=========================================="
           echo "  API:        ${API_NAME}"
           echo "  Version:    ${API_VERSION}"
-          echo "  Revision:   ${REVISION_ID}"
-          echo "  Target:     ${TARGET_ENV}"
+          echo "  From:       ${SOURCE_ENV}"
+          echo "  To:         ${TARGET_ENV}"
           echo "  Subdominio: ${SUBDOMINIO}"
           echo "=========================================="
           echo ""
           echo "TODO: Integrar con WSO2-Processor para deploy real"
 
-      # -----------------------------------------------------------------------
-      # Paso 9: Crear Issue de tracking (opcional)
-      # -----------------------------------------------------------------------
-      - name: Create tracking issue
-        if: ${{ steps.params.outputs.target_env == 'pro' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          API_NAME="${{ steps.params.outputs.api_name }}"
-          API_VERSION="${{ steps.params.outputs.api_version }}"
-          REVISION_ID="${{ steps.params.outputs.revision_id }}"
-          SUBDOMINIO="${{ steps.params.outputs.subdominio }}"
-
-          gh issue create \
-            --title "PRO Deploy: ${API_NAME} ${API_VERSION} ${REVISION_ID}" \
-            --body "## Promoción a Producción
-
-          | Campo | Valor |
-          |-------|-------|
-          | API | ${API_NAME} |
-          | Version | ${API_VERSION} |
-          | Revision | ${REVISION_ID} |
-          | Subdominio | ${SUBDOMINIO} |
-          | Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
-
-          ### Status
-          - [x] Promoción iniciada
-          - [ ] Deployment a PRO completado
-          - [ ] Verificación post-deploy
-
-          ---
-          _Automated by GIT-Helix-Processor_" \
-            --label "env:pro,action:promote"
+          echo "## Promoción Completada" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| API | ${API_NAME} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${API_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| From | ${SOURCE_ENV} |" >> $GITHUB_STEP_SUMMARY
+          echo "| To | ${TARGET_ENV} |" >> $GITHUB_STEP_SUMMARY

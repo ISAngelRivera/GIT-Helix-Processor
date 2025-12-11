@@ -6,34 +6,20 @@
 #   Recibe webhooks de Helix ITSM cuando un CRQ es aprobado o rechazado
 #   y procesa la solicitud creando PR en el repo de dominio o cerrando el Issue.
 #
-# FLUJO:
-#   1. Recibe repository_dispatch con event_type=helix-approval
-#   2. Valida payload (crq_id, status, request_id)
-#   3. Busca Issue pendiente con el request_id
-#   4. Si REJECTED: cierra Issue con comentario
-#   5. Si APPROVED: descarga artifact, crea PR en repo destino, auto-merge
-#
-# NUEVA ESTRUCTURA (v2 - Multi-Entorno):
+# ESTRUCTURA SIMPLIFICADA (v3 - Sin Revisiones):
 #   apis/{APIName}/
 #     state.yaml                    # Estado por entorno (auto-generated)
 #     {Version}/
-#       {rev-N}/
-#         api.yaml                  # Definición API
-#         Definitions/swagger.yaml  # Contrato OpenAPI
-#         Conf/
-#           api_meta.yaml           # Metadata deploy
-#           params.yaml             # Config UAT/NFT/PRO
-#           request.yaml            # Trazabilidad
+#       api.yaml                    # Definición API (actualizada en cada registro)
+#       Definitions/swagger.yaml    # Contrato OpenAPI
+#       Conf/
+#         api_meta.yaml             # Metadata deploy
+#         params.yaml               # Config UAT/NFT/PRO
+#         request.yaml              # Última solicitud (trazabilidad)
 #
-# PAYLOAD ESPERADO:
-#   {
-#     "crq_id": "CRQ-xxx",
-#     "status": "APPROVED" | "REJECTED",
-#     "request_id": "REQ-xxx"
-#   }
-#
-# CONFIGURACIÓN REQUERIDA (GitHub Secrets):
-#   - SUBDOMINIO_PAT: Token con permisos en repos de dominio (para crear PRs)
+# FLUJO:
+#   - Si la versión NO existe → Crear carpeta + archivos
+#   - Si la versión YA existe → Sobrescribir (actualizar)
 #
 # =============================================================================
 name: On Helix Approval
@@ -45,7 +31,6 @@ on:
 env:
   CONFIG_FILE: repo-config.yaml
   MAX_VERSIONS: "4"
-  MAX_REVISIONS: "4"
 
 permissions:
   contents: read
@@ -113,14 +98,12 @@ jobs:
 
           echo "::notice::Encontrado Issue #${ISSUE_NUMBER}"
 
-          # Extraer metadata del body del issue (formato YAML)
+          # Extraer metadata del body del issue
           API_NAME=$(echo "$ISSUE_BODY" | grep "^api_name:" | cut -d: -f2 | tr -d ' ')
           API_VERSION=$(echo "$ISSUE_BODY" | grep "^api_version:" | cut -d: -f2 | tr -d ' ')
           SUBDOMINIO=$(echo "$ISSUE_BODY" | grep "^subdominio:" | cut -d: -f2 | tr -d ' ')
-          REVISION_ID=$(echo "$ISSUE_BODY" | grep "^revision_id:" | cut -d: -f2 | tr -d ' ')
           USER_ID=$(echo "$ISSUE_BODY" | grep "^user_id:" | cut -d: -f2 | tr -d ' ')
           BACKEND_URL=$(echo "$ISSUE_BODY" | grep "^backend_url:" | cut -d: -f2- | tr -d ' ')
-          API_CONTEXT=$(echo "$ISSUE_BODY" | grep "^api_context:" | cut -d: -f2 | tr -d ' ')
           ACTION=$(echo "$ISSUE_BODY" | grep "^action:" | cut -d: -f2 | tr -d ' ')
           ENVIRONMENT=$(echo "$ISSUE_BODY" | grep "^environment:" | cut -d: -f2 | tr -d ' ')
 
@@ -132,10 +115,8 @@ jobs:
           echo "api_name=${API_NAME}" >> $GITHUB_OUTPUT
           echo "api_version=${API_VERSION}" >> $GITHUB_OUTPUT
           echo "subdominio=${SUBDOMINIO}" >> $GITHUB_OUTPUT
-          echo "revision_id=${REVISION_ID}" >> $GITHUB_OUTPUT
           echo "user_id=${USER_ID}" >> $GITHUB_OUTPUT
           echo "backend_url=${BACKEND_URL}" >> $GITHUB_OUTPUT
-          echo "api_context=${API_CONTEXT}" >> $GITHUB_OUTPUT
           echo "action=${ACTION}" >> $GITHUB_OUTPUT
           echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
 
@@ -151,7 +132,6 @@ jobs:
           CRQ_ID="${{ steps.validate.outputs.crq_id }}"
           API_NAME="${{ steps.find-request.outputs.api_name }}"
           API_VERSION="${{ steps.find-request.outputs.api_version }}"
-          REVISION_ID="${{ steps.find-request.outputs.revision_id }}"
 
           echo "::warning::CRQ ${CRQ_ID} RECHAZADO"
 
@@ -161,7 +141,7 @@ jobs:
           | Campo | Valor |
           |-------|-------|
           | CRQ | ${CRQ_ID} |
-          | API | ${API_NAME} v${API_VERSION} ${REVISION_ID} |
+          | API | ${API_NAME} v${API_VERSION} |
           | Status | **REJECTED** |
 
           La solicitud ha sido rechazada por Helix ITSM."
@@ -222,13 +202,12 @@ jobs:
             echo "artifact_found=false" >> $GITHUB_OUTPUT
           else
             echo "artifact_found=true" >> $GITHUB_OUTPUT
-            # Mostrar contenido descargado
             echo "Contenido descargado:"
             find ./api-export -type f
           fi
 
       # -----------------------------------------------------------------------
-      # Paso 5: Crear PR en el repositorio de dominio (NUEVA ESTRUCTURA)
+      # Paso 5: Crear PR en el repositorio de dominio (SIN REVISIONES)
       # -----------------------------------------------------------------------
       - name: Create PR in Subdominio Repo
         if: steps.validate.outputs.status == 'APPROVED'
@@ -237,7 +216,6 @@ jobs:
         run: |
           API_NAME="${{ steps.find-request.outputs.api_name }}"
           API_VERSION="${{ steps.find-request.outputs.api_version }}"
-          REVISION_ID="${{ steps.find-request.outputs.revision_id }}"
           TARGET_REPO="${{ steps.config.outputs.git_repo }}"
           CRQ_ID="${{ steps.validate.outputs.crq_id }}"
           USER_ID="${{ steps.find-request.outputs.user_id }}"
@@ -250,13 +228,13 @@ jobs:
           # Extract short unique suffix from requestId
           REQ_SUFFIX=$(echo "${REQUEST_ID}" | rev | cut -d'-' -f1 | rev)
 
-          # Branch name con environment
-          BRANCH_NAME="api/${ENVIRONMENT}/${API_NAME}-${API_VERSION}-${REVISION_ID}-${REQ_SUFFIX}"
+          # Branch name simplificado (sin revisión)
+          BRANCH_NAME="api/${ENVIRONMENT}/${API_NAME}-${API_VERSION}-${REQ_SUFFIX}"
 
           echo "=========================================="
           echo "  Creating PR in ${TARGET_REPO}"
           echo "=========================================="
-          echo "API: ${API_NAME} v${API_VERSION} ${REVISION_ID}"
+          echo "API: ${API_NAME} v${API_VERSION}"
           echo "Action: ${ACTION}"
           echo "Environment: ${ENVIRONMENT}"
           echo "Branch: ${BRANCH_NAME}"
@@ -285,30 +263,27 @@ jobs:
           git checkout -b "${BRANCH_NAME}"
 
           # =================================================================
-          # NUEVA ESTRUCTURA v2
+          # ESTRUCTURA v3 - SIN REVISIONES
           # =================================================================
           # apis/{APIName}/
           #   state.yaml
           #   {Version}/
-          #     {rev-N}/
-          #       api.yaml
-          #       Definitions/swagger.yaml
-          #       Conf/api_meta.yaml
-          #       Conf/params.yaml
-          #       Conf/request.yaml
+          #     api.yaml
+          #     Definitions/swagger.yaml
+          #     Conf/api_meta.yaml
+          #     Conf/params.yaml
+          #     Conf/request.yaml
           # =================================================================
 
           API_PATH="apis/${API_NAME}"
           VERSION_PATH="${API_PATH}/${API_VERSION}"
-          REVISION_PATH="${VERSION_PATH}/${REVISION_ID}"
 
           # Crear estructura de directorios
-          mkdir -p "${REVISION_PATH}/Definitions"
-          mkdir -p "${REVISION_PATH}/Conf"
+          mkdir -p "${VERSION_PATH}/Definitions"
+          mkdir -p "${VERSION_PATH}/Conf"
 
           # Copiar archivos del artifact si existe
           if [ -d "../api-export" ] && [ -n "$(ls -A ../api-export 2>/dev/null)" ]; then
-            # Buscar el directorio del API exportado
             EXPORT_DIR=$(find ../api-export -type d -name "${API_NAME}-${API_VERSION}" | head -1)
 
             if [ -n "$EXPORT_DIR" ] && [ -d "$EXPORT_DIR" ]; then
@@ -316,37 +291,36 @@ jobs:
 
               # Copiar api.json -> api.yaml
               if [ -f "${EXPORT_DIR}/api.json" ]; then
-                cp "${EXPORT_DIR}/api.json" "${REVISION_PATH}/api.yaml"
+                cp "${EXPORT_DIR}/api.json" "${VERSION_PATH}/api.yaml"
                 echo "✓ api.yaml"
               fi
 
               # Copiar swagger
               if [ -f "${EXPORT_DIR}/Definitions/swagger.json" ]; then
-                cp "${EXPORT_DIR}/Definitions/swagger.json" "${REVISION_PATH}/Definitions/swagger.yaml"
+                cp "${EXPORT_DIR}/Definitions/swagger.json" "${VERSION_PATH}/Definitions/swagger.yaml"
                 echo "✓ swagger.yaml"
               elif [ -f "${EXPORT_DIR}/Definitions/swagger.yaml" ]; then
-                cp "${EXPORT_DIR}/Definitions/swagger.yaml" "${REVISION_PATH}/Definitions/swagger.yaml"
+                cp "${EXPORT_DIR}/Definitions/swagger.yaml" "${VERSION_PATH}/Definitions/swagger.yaml"
                 echo "✓ swagger.yaml"
               fi
 
               # Copiar api_meta.yaml
               if [ -f "${EXPORT_DIR}/api_meta.yaml" ]; then
-                cp "${EXPORT_DIR}/api_meta.yaml" "${REVISION_PATH}/Conf/api_meta.yaml"
+                cp "${EXPORT_DIR}/api_meta.yaml" "${VERSION_PATH}/Conf/api_meta.yaml"
                 echo "✓ api_meta.yaml"
               fi
             else
               echo "No se encontró directorio de export, buscando archivos sueltos..."
-              # Buscar archivos en cualquier ubicación
-              find ../api-export -name "api.json" -exec cp {} "${REVISION_PATH}/api.yaml" \; 2>/dev/null || true
-              find ../api-export -name "swagger.json" -exec cp {} "${REVISION_PATH}/Definitions/swagger.yaml" \; 2>/dev/null || true
-              find ../api-export -name "swagger.yaml" -exec cp {} "${REVISION_PATH}/Definitions/swagger.yaml" \; 2>/dev/null || true
-              find ../api-export -name "api_meta.yaml" -exec cp {} "${REVISION_PATH}/Conf/api_meta.yaml" \; 2>/dev/null || true
+              find ../api-export -name "api.json" -exec cp {} "${VERSION_PATH}/api.yaml" \; 2>/dev/null || true
+              find ../api-export -name "swagger.json" -exec cp {} "${VERSION_PATH}/Definitions/swagger.yaml" \; 2>/dev/null || true
+              find ../api-export -name "swagger.yaml" -exec cp {} "${VERSION_PATH}/Definitions/swagger.yaml" \; 2>/dev/null || true
+              find ../api-export -name "api_meta.yaml" -exec cp {} "${VERSION_PATH}/Conf/api_meta.yaml" \; 2>/dev/null || true
             fi
           fi
 
           # Generar api_meta.yaml si no existe
-          if [ ! -f "${REVISION_PATH}/Conf/api_meta.yaml" ]; then
-            cat > "${REVISION_PATH}/Conf/api_meta.yaml" << EOF
+          if [ ! -f "${VERSION_PATH}/Conf/api_meta.yaml" ]; then
+            cat > "${VERSION_PATH}/Conf/api_meta.yaml" << EOF
 deploy:
   import:
     preserveProvider: false
@@ -359,11 +333,11 @@ EOF
           fi
 
           # Generar params.yaml con configuración multi-entorno
-          cat > "${REVISION_PATH}/Conf/params.yaml" << EOF
+          cat > "${VERSION_PATH}/Conf/params.yaml" << EOF
 # =============================================================================
-# ${API_NAME} ${API_VERSION} ${REVISION_ID} - Configuración por Entorno
+# ${API_NAME} ${API_VERSION} - Configuración por Entorno
 # =============================================================================
-# Generado: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Última actualización: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # CRQ: ${CRQ_ID}
 # =============================================================================
 
@@ -454,11 +428,15 @@ environments:
 EOF
           echo "✓ params.yaml"
 
-          # Generar request.yaml (trazabilidad)
-          cat > "${REVISION_PATH}/Conf/request.yaml" << EOF
-# Trazabilidad de la solicitud
+          # Generar request.yaml (trazabilidad de la última solicitud)
+          cat > "${VERSION_PATH}/Conf/request.yaml" << EOF
+# =============================================================================
+# Última solicitud de registro
+# =============================================================================
+# Este archivo se sobrescribe en cada registro
+# =============================================================================
+
 request_id: ${REQUEST_ID}
-revision_id: ${REVISION_ID}
 timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 action: ${ACTION}
 environment: ${ENVIRONMENT}
@@ -482,14 +460,13 @@ EOF
           # =================================================================
           STATE_FILE="${API_PATH}/state.yaml"
 
-          if [ ! -f "${STATE_FILE}" ]; then
-            # Crear state.yaml inicial
-            cat > "${STATE_FILE}" << EOF
+          # Siempre recrear state.yaml con la info actual
+          cat > "${STATE_FILE}" << EOF
 # =============================================================================
 # ${API_NAME} - Estado de Deployments por Entorno
 # =============================================================================
 # ARCHIVO AUTO-GENERADO por GIT-Helix-Processor
-# NO EDITAR MANUALMENTE
+# Se actualiza en cada registro
 # =============================================================================
 
 api_name: ${API_NAME}
@@ -498,48 +475,36 @@ last_updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 environments:
   uat:
     version: ${API_VERSION}
-    revision: ${REVISION_ID}
     status: REGISTERED
-    deployed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-    deployed_by: ${USER_ID}
+    registered_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+    registered_by: ${USER_ID}
     helix_crq: ${CRQ_ID}
 
   nft:
     version: null
-    revision: null
     status: NOT_DEPLOYED
 
   pro:
     version: null
-    revision: null
     status: NOT_DEPLOYED
 
-history:
-  - timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-    action: ${ACTION}
-    environment: ${ENVIRONMENT}
-    version: ${API_VERSION}
-    revision: ${REVISION_ID}
-    crq: ${CRQ_ID}
-    user: ${USER_ID}
+last_registration:
+  request_id: ${REQUEST_ID}
+  timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+  api_version: ${API_VERSION}
+  crq: ${CRQ_ID}
+  user: ${USER_ID}
 EOF
-            echo "✓ state.yaml (creado)"
-          else
-            # Actualizar state.yaml existente
-            # Por simplicidad, recreamos la sección del entorno
-            echo "::notice::Actualizando state.yaml existente"
-            # TODO: Implementar actualización parcial con yq
-            echo "✓ state.yaml (existente, requiere actualización manual)"
-          fi
+          echo "✓ state.yaml"
 
           # Mostrar estructura creada
           echo ""
-          echo "Estructura creada:"
+          echo "Estructura creada/actualizada:"
           find "${API_PATH}" -type f | sort
 
           # Commit
           git add .
-          COMMIT_MSG="feat(${API_NAME}): ${API_VERSION} ${REVISION_ID} - Helix Approved [${CRQ_ID}]
+          COMMIT_MSG="feat(${API_NAME}): v${API_VERSION} - Helix Approved [${CRQ_ID}]
 
 Action: ${ACTION}
 Environment: ${ENVIRONMENT}
@@ -551,9 +516,9 @@ Request: ${REQUEST_ID}"
           # Push
           git push origin "${BRANCH_NAME}"
 
-          # Create PR con labels
+          # Create PR
           ENV_UPPER=$(echo "${ENVIRONMENT}" | tr '[:lower:]' '[:upper:]')
-          PR_TITLE="${ENV_UPPER} DEPLOY: ${API_NAME} v${API_VERSION} ${REVISION_ID} [${CRQ_ID}]"
+          PR_TITLE="${ENV_UPPER} DEPLOY: ${API_NAME} v${API_VERSION} [${CRQ_ID}]"
 
           PR_URL=$(gh pr create \
             --repo "${TARGET_REPO}" \
@@ -567,7 +532,6 @@ Request: ${REQUEST_ID}"
 |-------|-------|
 | API | ${API_NAME} |
 | Version | ${API_VERSION} |
-| Revision | ${REVISION_ID} |
 | Environment | ${ENVIRONMENT} |
 | Action | ${ACTION} |
 | Subdominio | ${SUBDOMINIO} |
@@ -576,11 +540,11 @@ Request: ${REQUEST_ID}"
 | Solicitante | ${USER_ID} |
 | Request ID | ${REQUEST_ID} |
 
-### Estructura Creada
+### Estructura
 \`\`\`
 apis/${API_NAME}/
   state.yaml
-  ${API_VERSION}/${REVISION_ID}/
+  ${API_VERSION}/
     api.yaml
     Definitions/swagger.yaml
     Conf/
@@ -588,9 +552,6 @@ apis/${API_NAME}/
       params.yaml
       request.yaml
 \`\`\`
-
-### Trazabilidad
-- Approval workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
 ---
 Aprobado por Helix ITSM - Auto-merged by Helix-Processor
@@ -628,7 +589,6 @@ EOF
           CRQ_ID="${{ steps.validate.outputs.crq_id }}"
           API_NAME="${{ steps.find-request.outputs.api_name }}"
           API_VERSION="${{ steps.find-request.outputs.api_version }}"
-          REVISION_ID="${{ steps.find-request.outputs.revision_id }}"
           ENVIRONMENT="${{ steps.find-request.outputs.environment }}"
 
           ENV_UPPER=$(echo "${ENVIRONMENT}" | tr '[:lower:]' '[:upper:]')
@@ -639,11 +599,11 @@ EOF
           | Campo | Valor |
           |-------|-------|
           | CRQ | ${CRQ_ID} |
-          | API | ${API_NAME} v${API_VERSION} ${REVISION_ID} |
+          | API | ${API_NAME} v${API_VERSION} |
           | Environment | ${ENV_UPPER} |
           | Status | **APPROVED** |
 
-          API registrada exitosamente en la nueva estructura multi-entorno.
+          API registrada exitosamente. Estructura sin revisiones.
           PR creada y auto-merged."
 
           gh issue edit "${ISSUE_NUMBER}" \
@@ -661,6 +621,6 @@ EOF
           echo "| CRQ | ${{ steps.validate.outputs.crq_id }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | ${{ steps.validate.outputs.status }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Request ID | ${{ steps.validate.outputs.request_id }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| API | ${{ steps.find-request.outputs.api_name }} v${{ steps.find-request.outputs.api_version }} ${{ steps.find-request.outputs.revision_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| API | ${{ steps.find-request.outputs.api_name }} v${{ steps.find-request.outputs.api_version }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Environment | ${{ steps.find-request.outputs.environment }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Action | ${{ steps.find-request.outputs.action }} |" >> $GITHUB_STEP_SUMMARY
