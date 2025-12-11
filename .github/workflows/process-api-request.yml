@@ -1,20 +1,31 @@
 # =============================================================================
 # GIT-Helix-Processor: Motor Central de Procesamiento de APIs
 # =============================================================================
-# NUEVO FLUJO CON WEBHOOK:
-# 1. Recibe solicitud de WSO2-Processor
-# 2. Valida subdominio y datos
-# 3. Crea Issue como "cola" de solicitudes pendientes
-# 4. Guarda artifact con el export de la API
-# 5. Crea CRQ en Helix ITSM (simulado por ahora)
-# 6. Termina - NO crea PR directamente
 #
-# Cuando Helix aprueba, envía webhook → on-helix-approval.yml crea la PR
+# PROPÓSITO:
+#   Motor central vendor-agnostic que recibe solicitudes de registro de APIs
+#   desde extractores (WSO2-Processor, etc.) y las procesa con integración ITSM.
 #
-# Para simular la aprobación de Helix (testing), ejecutar:
+# FLUJO:
+#   1. Recibe solicitud de un extractor (WSO2-Processor, etc.)
+#   2. Valida que el subdominio exista en repo-config.yaml
+#   3. Crea Issue como "cola" de solicitudes pendientes
+#   4. Guarda artifact con el export de la API (30 días retención)
+#   5. Crea CRQ en Helix ITSM (simulado por ahora)
+#   6. Si AUTO_APPROVE=true, dispara on-helix-approval.yml automáticamente
+#
+# CONFIGURACIÓN REQUERIDA (GitHub Secrets):
+#   - GIT_HELIX_PAT: Token con permisos repo, workflow (para dispatches)
+#
+# VARIABLES DE REPOSITORIO (Settings > Variables):
+#   - AUTO_APPROVE: "true" para testing, "false" para producción
+#                   (Por defecto: false si no se configura)
+#
+# Para simular aprobación manual de Helix:
 #   gh api repos/OWNER/GIT-Helix-Processor/dispatches \
 #     -f event_type=helix-approval \
 #     -f client_payload='{"crq_id":"CRQ-xxx","status":"APPROVED","request_id":"REQ-xxx"}'
+#
 # =============================================================================
 name: Process API Request
 
@@ -69,11 +80,14 @@ on:
         default: 'unknown'
 
 env:
+  # Archivo de configuración de subdominios
   CONFIG_FILE: repo-config.yaml
+  # Límites de retención (para futuras implementaciones de limpieza)
   MAX_VERSIONS: "4"
   MAX_REVISIONS: "4"
-  # Feature flag: si true, simula aprobación automática (para testing)
-  AUTO_APPROVE: "true"
+  # Feature flag: auto-aprobar para testing (configurar como variable de repo)
+  # En producción: Settings > Variables > AUTO_APPROVE = "false"
+  AUTO_APPROVE: ${{ vars.AUTO_APPROVE || 'false' }}
 
 # Permissions required for creating Issues and artifacts
 permissions:
@@ -105,33 +119,28 @@ jobs:
           echo "request_id=${REQUEST_ID}" >> $GITHUB_OUTPUT
           echo "Request ID: ${REQUEST_ID}"
 
+      # -----------------------------------------------------------------------
+      # Paso 2: Log de la solicitud
+      # -----------------------------------------------------------------------
       - name: Log Request
         run: |
-          echo "=========================================="
-          echo "  API Registration Request"
-          echo "=========================================="
+          echo "::notice title=API Request::${{ inputs.apiName }} v${{ inputs.apiVersion }} from ${{ inputs.sourceSystem }}"
           echo "Request ID:  ${{ steps.request-id.outputs.request_id }}"
           echo "Subdominio:  ${{ inputs.subdominio }}"
-          echo "API:         ${{ inputs.apiName }} v${{ inputs.apiVersion }}"
           echo "Revision:    ${{ inputs.revisionId }}"
-          echo "Context:     ${{ inputs.apiContext }}"
-          echo "Source:      ${{ inputs.sourceSystem }}"
           echo "User:        ${{ inputs.userId }}"
-          echo "=========================================="
 
+      # -----------------------------------------------------------------------
+      # Paso 3: Validar que el subdominio existe en la configuración
+      # -----------------------------------------------------------------------
       - name: Validate Subdominio Exists
         id: validate
         run: |
           SUBDOMINIO="${{ inputs.subdominio }}"
 
           if ! grep -q "^  ${SUBDOMINIO}:" ${{ env.CONFIG_FILE }}; then
-            echo "=========================================="
-            echo "  ERROR: Subdominio '$SUBDOMINIO' no existe"
-            echo "=========================================="
-            echo ""
-            echo "Subdominios disponibles:"
-            grep -E "^  [a-z]" ${{ env.CONFIG_FILE }} | grep ":" | sed 's/://g' | sed 's/^ */  - /'
-            echo ""
+            AVAILABLE=$(grep -E "^  [a-z]" ${{ env.CONFIG_FILE }} | grep ":" | sed 's/://g' | sed 's/^ *//' | tr '\n' ', ')
+            echo "::error title=Subdominio inválido::El subdominio '$SUBDOMINIO' no está configurado. Disponibles: ${AVAILABLE}"
             exit 1
           fi
 
@@ -139,14 +148,16 @@ jobs:
           GIT_REPO=$(awk "/^  ${SUBDOMINIO}:/{found=1} found && /git_repo:/{print \$2; exit}" ${{ env.CONFIG_FILE }} | tr -d '"')
 
           if [ -z "$GIT_REPO" ]; then
-            echo "ERROR: No se encontro git_repo para subdominio '$SUBDOMINIO'"
+            echo "::error::No se encontró git_repo para subdominio '$SUBDOMINIO' en ${{ env.CONFIG_FILE }}"
             exit 1
           fi
 
-          echo "Subdominio validado: $SUBDOMINIO"
-          echo "Target repo: $GIT_REPO"
+          echo "::notice::Subdominio validado: $SUBDOMINIO → $GIT_REPO"
           echo "git_repo=${GIT_REPO}" >> $GITHUB_OUTPUT
 
+      # -----------------------------------------------------------------------
+      # Paso 4: Parsear Revision ID
+      # -----------------------------------------------------------------------
       - name: Set Revision ID
         id: revision-id
         run: |
@@ -155,35 +166,34 @@ jobs:
           REVISION_ID="rev-${REV_NUM}"
           echo "revision_id=${REVISION_ID}" >> $GITHUB_OUTPUT
           echo "revision_num=${REV_NUM}" >> $GITHUB_OUTPUT
-          echo "Revision ID: ${REVISION_ID}"
 
+      # -----------------------------------------------------------------------
+      # Paso 5: Decodificar y extraer el export de la API
+      # -----------------------------------------------------------------------
       - name: Decode and Extract API Export
         id: extract
         run: |
-          echo "Decoding API export ZIP..."
           mkdir -p ./api-export
-
-          # Decodificar el ZIP
           echo "${{ inputs.apiExportZip }}" | base64 -d > ./api-export/export.zip
-
-          # Descomprimir
           unzip -q ./api-export/export.zip -d ./api-export/extracted
-
-          # Encontrar directorio de la API
           API_DIR=$(find ./api-export/extracted -type d -mindepth 1 -maxdepth 1 | head -1)
           echo "api_dir=${API_DIR}" >> $GITHUB_OUTPUT
+          echo "::notice::API export extraído: $(ls "$API_DIR" | wc -l) archivos"
 
-          echo "Contenido extraido:"
-          ls -la "$API_DIR"
-
+      # -----------------------------------------------------------------------
+      # Paso 6: Validaciones de calidad (futuro: Spectral, seguridad, etc.)
+      # -----------------------------------------------------------------------
       - name: Run Linters
         run: |
-          echo "TODO: Ejecutar linters (Spectral, validaciones de seguridad...)"
-          echo "Por ahora: SKIP"
+          # TODO: Integrar validaciones
+          # - Spectral para OpenAPI
+          # - Validaciones de seguridad (OWASP)
+          # - Validaciones de naming conventions
+          echo "::notice::Linters: SKIP (no configurados)"
 
-      # =========================================
-      # Crear Issue como "cola" de solicitudes
-      # =========================================
+      # -----------------------------------------------------------------------
+      # Paso 7: Crear Issue como "cola" de solicitudes pendientes
+      # -----------------------------------------------------------------------
       - name: Create Pending Request Issue
         id: create-issue
         env:
@@ -256,9 +266,9 @@ jobs:
           echo "issue_number=${ISSUE_NUMBER}" >> $GITHUB_OUTPUT
           echo "issue_url=${ISSUE_URL}" >> $GITHUB_OUTPUT
 
-      # =========================================
-      # Guardar artifact para cuando Helix apruebe
-      # =========================================
+      # -----------------------------------------------------------------------
+      # Paso 8: Guardar artifact para cuando Helix apruebe
+      # -----------------------------------------------------------------------
       - name: Save API Export Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -266,9 +276,9 @@ jobs:
           path: ./api-export/extracted/
           retention-days: 30
 
-      # =========================================
-      # Crear CRQ en Helix (simulado)
-      # =========================================
+      # -----------------------------------------------------------------------
+      # Paso 9: Crear CRQ en Helix ITSM (simulado por ahora)
+      # -----------------------------------------------------------------------
       - name: Create Helix CRQ
         id: helix
         env:
@@ -307,9 +317,9 @@ jobs:
 
           echo "crq_id=${CRQ_ID}" >> $GITHUB_OUTPUT
 
-      # =========================================
-      # SIMULACIÓN: Auto-aprobar para testing
-      # =========================================
+      # -----------------------------------------------------------------------
+      # Paso 10: Auto-aprobar para testing (solo si AUTO_APPROVE=true)
+      # -----------------------------------------------------------------------
       - name: Simulate Helix Approval (Testing Only)
         if: env.AUTO_APPROVE == 'true'
         env:

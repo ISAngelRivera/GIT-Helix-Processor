@@ -1,25 +1,51 @@
 # =============================================================================
 # GIT-Helix-Processor: Configuración de Subdominios
 # =============================================================================
-# Motor central vendor-agnostic para procesamiento de APIs.
-# Mapea subdominios a sus repositorios de almacenamiento.
+#
+# Este archivo mapea subdominios de negocio a sus repositorios Git de destino.
+# Cuando una API especifica un subdominio en WSO2 (additionalProperties.subdominio),
+# el sistema usa este mapeo para determinar dónde almacenar la API.
+#
+# FORMATO:
+#   subdominios:
+#     nombre-subdominio:
+#       description: "Descripción del dominio"
+#       git_repo: "org/repo-name"
+#       owners:
+#         - "email@company.com"
+#
+# IMPORTANTE:
+#   - Los nombres de subdominio deben ser lowercase y usar guiones
+#   - El git_repo debe existir y el SUBDOMINIO_PAT debe tener acceso
+#   - Los owners reciben notificaciones (futuro)
+#
 # =============================================================================
 
 subdominios:
+  # Dominio: Finanzas y Pagos
   finanzas-pagos:
     description: "APIs del dominio de Finanzas y Pagos"
     git_repo: "ISAngelRivera/Finanzas-Pagos"
     owners:
       - "team-finanzas@company.com"
 
+  # Dominio: Recursos Humanos
   rrhh-empleados:
     description: "APIs del dominio de RRHH y Empleados"
     git_repo: "ISAngelRivera/RRHH-Empleados"
     owners:
       - "team-rrhh@company.com"
 
+  # Dominio: Informática y DevOps
   informatica-devops:
-    description: "APIs del dominio de Informatica y DevOps"
+    description: "APIs del dominio de Informática y DevOps"
     git_repo: "ISAngelRivera/Informatica-DevOps"
     owners:
       - "team-devops@company.com"
+
+# =============================================================================
+# Para añadir un nuevo subdominio:
+# 1. Crear el repositorio destino (ej: org/NuevoDominio)
+# 2. Añadir entrada aquí con el formato correcto
+# 3. Asegurar que SUBDOMINIO_PAT tiene acceso al nuevo repo
+# =============================================================================
