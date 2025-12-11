@@ -13,6 +13,18 @@
 #   4. Si REJECTED: cierra Issue con comentario
 #   5. Si APPROVED: descarga artifact, crea PR en repo destino, auto-merge
 #
+# NUEVA ESTRUCTURA (v2 - Multi-Entorno):
+#   apis/{APIName}/
+#     state.yaml                    # Estado por entorno (auto-generated)
+#     {Version}/
+#       {rev-N}/
+#         api.yaml                  # Definición API
+#         Definitions/swagger.yaml  # Contrato OpenAPI
+#         Conf/
+#           api_meta.yaml           # Metadata deploy
+#           params.yaml             # Config UAT/NFT/PRO
+#           request.yaml            # Trazabilidad
+#
 # PAYLOAD ESPERADO:
 #   {
 #     "crq_id": "CRQ-xxx",
@@ -23,11 +35,6 @@
 # CONFIGURACIÓN REQUERIDA (GitHub Secrets):
 #   - SUBDOMINIO_PAT: Token con permisos en repos de dominio (para crear PRs)
 #
-# Para testing manual:
-#   gh api repos/OWNER/REPO/dispatches \
-#     -f event_type=helix-approval \
-#     -f client_payload='{"crq_id":"CRQ-123","status":"APPROVED","request_id":"REQ-xxx"}'
-#
 # =============================================================================
 name: On Helix Approval
 
@@ -36,13 +43,10 @@ on:
     types: [helix-approval]
 
 env:
-  # Archivo de configuración de subdominios
   CONFIG_FILE: repo-config.yaml
-  # Límites de retención (para futuras implementaciones de limpieza)
   MAX_VERSIONS: "4"
   MAX_REVISIONS: "4"
 
-# Permissions required for managing Issues and downloading artifacts
 permissions:
   contents: read
   issues: write
@@ -93,7 +97,6 @@ jobs:
         run: |
           REQUEST_ID="${{ steps.validate.outputs.request_id }}"
 
-          # Buscar Issue con este request ID
           ISSUE=$(gh issue list \
             --label "pending-helix" \
             --search "${REQUEST_ID} in:title" \
@@ -118,6 +121,12 @@ jobs:
           USER_ID=$(echo "$ISSUE_BODY" | grep "^user_id:" | cut -d: -f2 | tr -d ' ')
           BACKEND_URL=$(echo "$ISSUE_BODY" | grep "^backend_url:" | cut -d: -f2- | tr -d ' ')
           API_CONTEXT=$(echo "$ISSUE_BODY" | grep "^api_context:" | cut -d: -f2 | tr -d ' ')
+          ACTION=$(echo "$ISSUE_BODY" | grep "^action:" | cut -d: -f2 | tr -d ' ')
+          ENVIRONMENT=$(echo "$ISSUE_BODY" | grep "^environment:" | cut -d: -f2 | tr -d ' ')
+
+          # Default values
+          [ -z "$ACTION" ] && ACTION="deploy"
+          [ -z "$ENVIRONMENT" ] && ENVIRONMENT="uat"
 
           echo "issue_number=${ISSUE_NUMBER}" >> $GITHUB_OUTPUT
           echo "api_name=${API_NAME}" >> $GITHUB_OUTPUT
@@ -127,6 +136,8 @@ jobs:
           echo "user_id=${USER_ID}" >> $GITHUB_OUTPUT
           echo "backend_url=${BACKEND_URL}" >> $GITHUB_OUTPUT
           echo "api_context=${API_CONTEXT}" >> $GITHUB_OUTPUT
+          echo "action=${ACTION}" >> $GITHUB_OUTPUT
+          echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
 
       # -----------------------------------------------------------------------
       # Paso 3a: Manejar RECHAZO - cerrar Issue
@@ -140,6 +151,7 @@ jobs:
           CRQ_ID="${{ steps.validate.outputs.crq_id }}"
           API_NAME="${{ steps.find-request.outputs.api_name }}"
           API_VERSION="${{ steps.find-request.outputs.api_version }}"
+          REVISION_ID="${{ steps.find-request.outputs.revision_id }}"
 
           echo "::warning::CRQ ${CRQ_ID} RECHAZADO"
 
@@ -149,14 +161,14 @@ jobs:
           | Campo | Valor |
           |-------|-------|
           | CRQ | ${CRQ_ID} |
-          | API | ${API_NAME} v${API_VERSION} |
+          | API | ${API_NAME} v${API_VERSION} ${REVISION_ID} |
           | Status | **REJECTED** |
 
           La solicitud ha sido rechazada por Helix ITSM."
 
           gh issue edit "${ISSUE_NUMBER}" \
             --remove-label "pending-helix" \
-            --add-label "rejected"
+            --add-label "status:rejected"
 
           echo "::notice::Issue #${ISSUE_NUMBER} cerrado como rechazado"
 
@@ -210,10 +222,13 @@ jobs:
             echo "artifact_found=false" >> $GITHUB_OUTPUT
           else
             echo "artifact_found=true" >> $GITHUB_OUTPUT
+            # Mostrar contenido descargado
+            echo "Contenido descargado:"
+            find ./api-export -type f
           fi
 
       # -----------------------------------------------------------------------
-      # Paso 5: Crear PR en el repositorio de dominio
+      # Paso 5: Crear PR en el repositorio de dominio (NUEVA ESTRUCTURA)
       # -----------------------------------------------------------------------
       - name: Create PR in Subdominio Repo
         if: steps.validate.outputs.status == 'APPROVED'
@@ -228,17 +243,24 @@ jobs:
           USER_ID="${{ steps.find-request.outputs.user_id }}"
           SUBDOMINIO="${{ steps.find-request.outputs.subdominio }}"
           REQUEST_ID="${{ steps.validate.outputs.request_id }}"
+          BACKEND_URL="${{ steps.find-request.outputs.backend_url }}"
+          ACTION="${{ steps.find-request.outputs.action }}"
+          ENVIRONMENT="${{ steps.find-request.outputs.environment }}"
 
-          # Extract short unique suffix from requestId (last part after last dash)
-          # REQ-accounta-68973-a1b2 -> a1b2
+          # Extract short unique suffix from requestId
           REQ_SUFFIX=$(echo "${REQUEST_ID}" | rev | cut -d'-' -f1 | rev)
 
-          # Include request suffix to guarantee unique branch names
-          BRANCH_NAME="api/${API_NAME}-${API_VERSION}-${REVISION_ID}-${REQ_SUFFIX}"
+          # Branch name con environment
+          BRANCH_NAME="api/${ENVIRONMENT}/${API_NAME}-${API_VERSION}-${REVISION_ID}-${REQ_SUFFIX}"
 
-          echo "Creating PR in ${TARGET_REPO}"
-          echo "API: ${API_NAME} v${API_VERSION}"
+          echo "=========================================="
+          echo "  Creating PR in ${TARGET_REPO}"
+          echo "=========================================="
+          echo "API: ${API_NAME} v${API_VERSION} ${REVISION_ID}"
+          echo "Action: ${ACTION}"
+          echo "Environment: ${ENVIRONMENT}"
           echo "Branch: ${BRANCH_NAME}"
+          echo ""
 
           # Clone target repo
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" target-repo
@@ -248,59 +270,290 @@ jobs:
           git config user.name "Helix-Processor Bot"
           git config user.email "helix-processor@github.actions"
 
-          # Check if this exact branch already exists (same requestId = duplicate request)
+          # Check if branch already exists
           if git ls-remote --exit-code --heads origin "${BRANCH_NAME}" > /dev/null 2>&1; then
             echo "Branch ${BRANCH_NAME} already exists (duplicate request)"
             EXISTING_PR=$(gh pr list --repo "${TARGET_REPO}" --head "${BRANCH_NAME}" --state all --json number,state --jq '.[0] | "\(.number) (\(.state))"')
             if [ -n "$EXISTING_PR" ]; then
-              echo "PR ${EXISTING_PR} already exists for this exact request - skipping duplicate"
+              echo "PR ${EXISTING_PR} already exists - skipping"
               exit 0
             fi
-            # Branch exists but no PR - safe to delete and recreate
             git push origin --delete "${BRANCH_NAME}" || true
           fi
 
           # Create branch
           git checkout -b "${BRANCH_NAME}"
 
-          # Define paths
+          # =================================================================
+          # NUEVA ESTRUCTURA v2
+          # =================================================================
+          # apis/{APIName}/
+          #   state.yaml
+          #   {Version}/
+          #     {rev-N}/
+          #       api.yaml
+          #       Definitions/swagger.yaml
+          #       Conf/api_meta.yaml
+          #       Conf/params.yaml
+          #       Conf/request.yaml
+          # =================================================================
+
           API_PATH="apis/${API_NAME}"
           VERSION_PATH="${API_PATH}/${API_VERSION}"
-          REVISION_PATH="${VERSION_PATH}/revisions/${REVISION_ID}"
+          REVISION_PATH="${VERSION_PATH}/${REVISION_ID}"
 
-          # Create structure
-          mkdir -p "${REVISION_PATH}"
+          # Crear estructura de directorios
+          mkdir -p "${REVISION_PATH}/Definitions"
+          mkdir -p "${REVISION_PATH}/Conf"
 
-          # Copy files if artifact was downloaded
+          # Copiar archivos del artifact si existe
           if [ -d "../api-export" ] && [ -n "$(ls -A ../api-export 2>/dev/null)" ]; then
-            cp -r ../api-export/* "${REVISION_PATH}/"
+            # Buscar el directorio del API exportado
+            EXPORT_DIR=$(find ../api-export -type d -name "${API_NAME}-${API_VERSION}" | head -1)
+
+            if [ -n "$EXPORT_DIR" ] && [ -d "$EXPORT_DIR" ]; then
+              echo "Encontrado export en: $EXPORT_DIR"
+
+              # Copiar api.json -> api.yaml
+              if [ -f "${EXPORT_DIR}/api.json" ]; then
+                cp "${EXPORT_DIR}/api.json" "${REVISION_PATH}/api.yaml"
+                echo "✓ api.yaml"
+              fi
+
+              # Copiar swagger
+              if [ -f "${EXPORT_DIR}/Definitions/swagger.json" ]; then
+                cp "${EXPORT_DIR}/Definitions/swagger.json" "${REVISION_PATH}/Definitions/swagger.yaml"
+                echo "✓ swagger.yaml"
+              elif [ -f "${EXPORT_DIR}/Definitions/swagger.yaml" ]; then
+                cp "${EXPORT_DIR}/Definitions/swagger.yaml" "${REVISION_PATH}/Definitions/swagger.yaml"
+                echo "✓ swagger.yaml"
+              fi
+
+              # Copiar api_meta.yaml
+              if [ -f "${EXPORT_DIR}/api_meta.yaml" ]; then
+                cp "${EXPORT_DIR}/api_meta.yaml" "${REVISION_PATH}/Conf/api_meta.yaml"
+                echo "✓ api_meta.yaml"
+              fi
+            else
+              echo "No se encontró directorio de export, buscando archivos sueltos..."
+              # Buscar archivos en cualquier ubicación
+              find ../api-export -name "api.json" -exec cp {} "${REVISION_PATH}/api.yaml" \; 2>/dev/null || true
+              find ../api-export -name "swagger.json" -exec cp {} "${REVISION_PATH}/Definitions/swagger.yaml" \; 2>/dev/null || true
+              find ../api-export -name "swagger.yaml" -exec cp {} "${REVISION_PATH}/Definitions/swagger.yaml" \; 2>/dev/null || true
+              find ../api-export -name "api_meta.yaml" -exec cp {} "${REVISION_PATH}/Conf/api_meta.yaml" \; 2>/dev/null || true
+            fi
           fi
 
-          # Create/update request.yaml
-          cat > "${REVISION_PATH}/request.yaml" << EOF
-          revision_id: ${REVISION_ID}
-          timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-          subdominio: ${SUBDOMINIO}
-          helix_crq: ${CRQ_ID}
-          helix_status: APPROVED
-          request_id: ${REQUEST_ID}
-          api:
-            name: ${API_NAME}
-            version: ${API_VERSION}
-          user: ${USER_ID}
-          approval_workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EOF
+          # Generar api_meta.yaml si no existe
+          if [ ! -f "${REVISION_PATH}/Conf/api_meta.yaml" ]; then
+            cat > "${REVISION_PATH}/Conf/api_meta.yaml" << EOF
+deploy:
+  import:
+    preserveProvider: false
+    rotateRevision: true
+    update: true
+name: ${API_NAME}
+version: ${API_VERSION}
+EOF
+            echo "✓ api_meta.yaml (generado)"
+          fi
+
+          # Generar params.yaml con configuración multi-entorno
+          cat > "${REVISION_PATH}/Conf/params.yaml" << EOF
+# =============================================================================
+# ${API_NAME} ${API_VERSION} ${REVISION_ID} - Configuración por Entorno
+# =============================================================================
+# Generado: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# CRQ: ${CRQ_ID}
+# =============================================================================
+
+environments:
+  # ---------------------------------------------------------------------------
+  # UAT - Desarrollo/Testing
+  # ---------------------------------------------------------------------------
+  - name: uat
+    configs:
+      endpoints:
+        production:
+          url: ${BACKEND_URL:-https://api-uat.internal.company.com/placeholder}
+          config:
+            retryTimeOut: 2
+            retryDelay: 500
+            suspendDuration: 10000
+            suspendMaxDuration: 30000
+
+      security:
+        production:
+          enabled: false
+
+      certs: []
+      mutualSslCerts: []
+
+      policies:
+        - Gold
+
+      deploymentEnvironments:
+        - displayOnDevportal: true
+          deploymentEnvironment: Default
+
+  # ---------------------------------------------------------------------------
+  # NFT - Pre-producción
+  # ---------------------------------------------------------------------------
+  - name: nft
+    configs:
+      endpoints:
+        production:
+          url: ${BACKEND_URL:-https://api-nft.internal.company.com/placeholder}
+          config:
+            retryTimeOut: 3
+            retryDelay: 1000
+            suspendDuration: 30000
+            suspendMaxDuration: 60000
+
+      security:
+        production:
+          enabled: false
+
+      certs: []
+      mutualSslCerts: []
+
+      policies:
+        - Platinum
+
+      deploymentEnvironments:
+        - displayOnDevportal: true
+          deploymentEnvironment: Default
+
+  # ---------------------------------------------------------------------------
+  # PRO - Producción
+  # ---------------------------------------------------------------------------
+  - name: pro
+    configs:
+      endpoints:
+        production:
+          url: ${BACKEND_URL:-https://api.company.com/placeholder}
+          config:
+            retryTimeOut: 5
+            retryDelay: 2000
+            suspendDuration: 60000
+            suspendMaxDuration: 300000
+
+      security:
+        production:
+          enabled: false
+
+      certs: []
+      mutualSslCerts: []
+
+      policies:
+        - Unlimited
+
+      deploymentEnvironments:
+        - displayOnDevportal: true
+          deploymentEnvironment: Default
+EOF
+          echo "✓ params.yaml"
+
+          # Generar request.yaml (trazabilidad)
+          cat > "${REVISION_PATH}/Conf/request.yaml" << EOF
+# Trazabilidad de la solicitud
+request_id: ${REQUEST_ID}
+revision_id: ${REVISION_ID}
+timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+action: ${ACTION}
+environment: ${ENVIRONMENT}
+subdominio: ${SUBDOMINIO}
+
+helix:
+  crq_id: ${CRQ_ID}
+  status: APPROVED
+
+api:
+  name: ${API_NAME}
+  version: ${API_VERSION}
+
+user: ${USER_ID}
+approval_workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+EOF
+          echo "✓ request.yaml"
+
+          # =================================================================
+          # Crear/Actualizar state.yaml a nivel de API
+          # =================================================================
+          STATE_FILE="${API_PATH}/state.yaml"
+
+          if [ ! -f "${STATE_FILE}" ]; then
+            # Crear state.yaml inicial
+            cat > "${STATE_FILE}" << EOF
+# =============================================================================
+# ${API_NAME} - Estado de Deployments por Entorno
+# =============================================================================
+# ARCHIVO AUTO-GENERADO por GIT-Helix-Processor
+# NO EDITAR MANUALMENTE
+# =============================================================================
+
+api_name: ${API_NAME}
+last_updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+environments:
+  uat:
+    version: ${API_VERSION}
+    revision: ${REVISION_ID}
+    status: REGISTERED
+    deployed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+    deployed_by: ${USER_ID}
+    helix_crq: ${CRQ_ID}
+
+  nft:
+    version: null
+    revision: null
+    status: NOT_DEPLOYED
+
+  pro:
+    version: null
+    revision: null
+    status: NOT_DEPLOYED
+
+history:
+  - timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+    action: ${ACTION}
+    environment: ${ENVIRONMENT}
+    version: ${API_VERSION}
+    revision: ${REVISION_ID}
+    crq: ${CRQ_ID}
+    user: ${USER_ID}
+EOF
+            echo "✓ state.yaml (creado)"
+          else
+            # Actualizar state.yaml existente
+            # Por simplicidad, recreamos la sección del entorno
+            echo "::notice::Actualizando state.yaml existente"
+            # TODO: Implementar actualización parcial con yq
+            echo "✓ state.yaml (existente, requiere actualización manual)"
+          fi
+
+          # Mostrar estructura creada
+          echo ""
+          echo "Estructura creada:"
+          find "${API_PATH}" -type f | sort
 
           # Commit
           git add .
-          COMMIT_MSG="feat(${API_NAME}): v${API_VERSION} ${REVISION_ID} - Helix Approved [${CRQ_ID}]"
+          COMMIT_MSG="feat(${API_NAME}): ${API_VERSION} ${REVISION_ID} - Helix Approved [${CRQ_ID}]
+
+Action: ${ACTION}
+Environment: ${ENVIRONMENT}
+User: ${USER_ID}
+Request: ${REQUEST_ID}"
+
           git commit -m "${COMMIT_MSG}" || echo "No changes to commit"
 
           # Push
           git push origin "${BRANCH_NAME}"
 
-          # Create PR
-          PR_TITLE="UAT [${SUBDOMINIO}]: ${API_NAME} v${API_VERSION} - ${REVISION_ID} [APPROVED]"
+          # Create PR con labels
+          ENV_UPPER=$(echo "${ENVIRONMENT}" | tr '[:lower:]' '[:upper:]')
+          PR_TITLE="${ENV_UPPER} DEPLOY: ${API_NAME} v${API_VERSION} ${REVISION_ID} [${CRQ_ID}]"
 
           PR_URL=$(gh pr create \
             --repo "${TARGET_REPO}" \
@@ -308,40 +561,53 @@ jobs:
             --head "${BRANCH_NAME}" \
             --title "${PR_TITLE}" \
             --body "$(cat <<EOF
-          ## API Registration - Helix APPROVED
+## API Registration - Helix APPROVED
 
-          | Campo | Valor |
-          |-------|-------|
-          | API | ${API_NAME} |
-          | Version | ${API_VERSION} |
-          | Revision | ${REVISION_ID} |
-          | Subdominio | ${SUBDOMINIO} |
-          | Helix CRQ | ${CRQ_ID} |
-          | Estado | **APPROVED** |
-          | Solicitante | ${USER_ID} |
-          | Request ID | ${REQUEST_ID} |
+| Campo | Valor |
+|-------|-------|
+| API | ${API_NAME} |
+| Version | ${API_VERSION} |
+| Revision | ${REVISION_ID} |
+| Environment | ${ENVIRONMENT} |
+| Action | ${ACTION} |
+| Subdominio | ${SUBDOMINIO} |
+| Helix CRQ | ${CRQ_ID} |
+| Estado | **APPROVED** |
+| Solicitante | ${USER_ID} |
+| Request ID | ${REQUEST_ID} |
 
-          ### Trazabilidad
-          - Approval workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+### Estructura Creada
+\`\`\`
+apis/${API_NAME}/
+  state.yaml
+  ${API_VERSION}/${REVISION_ID}/
+    api.yaml
+    Definitions/swagger.yaml
+    Conf/
+      api_meta.yaml
+      params.yaml
+      request.yaml
+\`\`\`
 
-          ---
-          Aprobado por Helix ITSM - Auto-merged by Helix-Processor
-          EOF
+### Trazabilidad
+- Approval workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+---
+Aprobado por Helix ITSM - Auto-merged by Helix-Processor
+EOF
           )")
 
           echo "PR created: ${PR_URL}"
 
-          # Merge inmediato (Helix ya aprobó, no requiere otra revisión humana)
+          # Merge inmediato
           echo "Merging PR..."
           if gh pr merge "${BRANCH_NAME}" --repo "${TARGET_REPO}" --squash --delete-branch; then
-            echo "pr_merged=true" >> $GITHUB_OUTPUT
             echo ""
             echo "=========================================="
             echo "  SUCCESS - PR Created and Merged"
             echo "  PR: ${PR_URL}"
             echo "=========================================="
           else
-            echo "pr_merged=false" >> $GITHUB_OUTPUT
             echo ""
             echo "=========================================="
             echo "  WARNING - PR Created but merge failed"
@@ -362,6 +628,10 @@ jobs:
           CRQ_ID="${{ steps.validate.outputs.crq_id }}"
           API_NAME="${{ steps.find-request.outputs.api_name }}"
           API_VERSION="${{ steps.find-request.outputs.api_version }}"
+          REVISION_ID="${{ steps.find-request.outputs.revision_id }}"
+          ENVIRONMENT="${{ steps.find-request.outputs.environment }}"
+
+          ENV_UPPER=$(echo "${ENVIRONMENT}" | tr '[:lower:]' '[:upper:]')
 
           gh issue close "${ISSUE_NUMBER}" \
             --comment "## CRQ Approved and Processed
@@ -369,14 +639,16 @@ jobs:
           | Campo | Valor |
           |-------|-------|
           | CRQ | ${CRQ_ID} |
-          | API | ${API_NAME} v${API_VERSION} |
+          | API | ${API_NAME} v${API_VERSION} ${REVISION_ID} |
+          | Environment | ${ENV_UPPER} |
           | Status | **APPROVED** |
 
-          API registrada exitosamente. PR creada y auto-merged."
+          API registrada exitosamente en la nueva estructura multi-entorno.
+          PR creada y auto-merged."
 
           gh issue edit "${ISSUE_NUMBER}" \
             --remove-label "pending-helix" \
-            --add-label "approved"
+            --add-label "status:approved"
 
           echo "::notice::Issue #${ISSUE_NUMBER} cerrado como aprobado"
 
@@ -389,4 +661,6 @@ jobs:
           echo "| CRQ | ${{ steps.validate.outputs.crq_id }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | ${{ steps.validate.outputs.status }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Request ID | ${{ steps.validate.outputs.request_id }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| API | ${{ steps.find-request.outputs.api_name }} v${{ steps.find-request.outputs.api_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| API | ${{ steps.find-request.outputs.api_name }} v${{ steps.find-request.outputs.api_version }} ${{ steps.find-request.outputs.revision_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ steps.find-request.outputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Action | ${{ steps.find-request.outputs.action }} |" >> $GITHUB_STEP_SUMMARY
