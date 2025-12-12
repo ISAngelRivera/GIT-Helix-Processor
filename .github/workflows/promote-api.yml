@@ -231,7 +231,7 @@ jobs:
           else
             git commit -m "promote: ${API_NAME} v${API_VERSION} ${SOURCE_ENV} -> ${TARGET_ENV}
 
-Automated promotion by GIT-Helix-Processor"
+Automated promotion by apim-apiops-controller"
             git push
           fi
 
@@ -256,7 +256,7 @@ Automated promotion by GIT-Helix-Processor"
           echo "  Subdominio: ${SUBDOMINIO}"
           echo "=========================================="
           echo ""
-          echo "TODO: Integrar con WSO2-Processor para deploy real"
+          echo "TODO: Integrar con apim-exporter-wso2 para deploy real"
 
           echo "## Promoción Completada" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

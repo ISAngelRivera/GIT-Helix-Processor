@@ -1,4 +1,4 @@
-# GIT-Helix-Processor
+# apim-apiops-controller
 
 Procesador genérico vendor-agnostic para integración Git ↔ Helix ITSM.
 
@@ -6,14 +6,14 @@ Procesador genérico vendor-agnostic para integración Git ↔ Helix ITSM.
 
 ```
 ┌─────────────────────┐     ┌─────────────────────┐
-│   WSO2-Processor    │     │  Apigee-Processor   │
+│   apim-exporter-wso2    │     │  Apigee-Processor   │
 │   Kong-Processor    │ ... │  Custom-Processor   │
 └─────────┬───────────┘     └─────────┬───────────┘
           │                           │
           │  PR con datos planos      │
           ▼                           ▼
 ┌─────────────────────────────────────────────────┐
-│              GIT-Helix-Processor                │  ← Este repositorio
+│              apim-apiops-controller                │  ← Este repositorio
 │                                                 │
 │  1. Recibe PRs en requests/                     │
 │  2. Valida (linters, Spectral)                  │
@@ -25,7 +25,7 @@ Procesador genérico vendor-agnostic para integración Git ↔ Helix ITSM.
 ## Estructura de Directorios
 
 ```
-GIT-Helix-Processor/
+apim-apiops-controller/
 ├── .github/workflows/
 │   └── on-request-pr.yml    # Procesa PRs de registro
 ├── requests/                 # PRs llegan aquí (temporal)
@@ -79,7 +79,7 @@ timestamp: 2024-12-04T10:30:00Z
 
 source:
   system: wso2          # o "apigee", "kong", etc.
-  processor: WSO2-Processor
+  processor: apim-exporter-wso2
   run_id: "12345"
 
 api:

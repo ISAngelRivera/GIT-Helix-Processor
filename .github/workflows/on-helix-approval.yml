@@ -1,5 +1,5 @@
 # =============================================================================
-# GIT-Helix-Processor: Receptor de Webhooks de Helix ITSM
+# apim-apiops-controller: Receptor de Webhooks de Helix ITSM
 # =============================================================================
 #
 # PROPÓSITO:
@@ -465,7 +465,7 @@ EOF
 # =============================================================================
 # ${API_NAME} - Estado de Deployments por Entorno
 # =============================================================================
-# ARCHIVO AUTO-GENERADO por GIT-Helix-Processor
+# ARCHIVO AUTO-GENERADO por apim-apiops-controller
 # Se actualiza en cada registro
 # =============================================================================
 

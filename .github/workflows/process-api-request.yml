@@ -1,13 +1,13 @@
 # =============================================================================
-# GIT-Helix-Processor: Motor Central de Procesamiento de APIs
+# apim-apiops-controller: Motor Central de Procesamiento de APIs
 # =============================================================================
 #
 # PROPÓSITO:
 #   Motor central vendor-agnostic que recibe solicitudes de registro de APIs
-#   desde extractores (WSO2-Processor, etc.) y las procesa con integración ITSM.
+#   desde extractores (apim-exporter-wso2, etc.) y las procesa con integración ITSM.
 #
 # FLUJO:
-#   1. Recibe solicitud de un extractor (WSO2-Processor, etc.)
+#   1. Recibe solicitud de un extractor (apim-exporter-wso2, etc.)
 #   2. Valida que el subdominio exista en repo-config.yaml
 #   3. Crea Issue como "cola" de solicitudes pendientes
 #   4. Guarda artifact con el export de la API (30 días retención)
@@ -22,7 +22,7 @@
 #                   (Por defecto: false si no se configura)
 #
 # Para simular aprobación manual de Helix:
-#   gh api repos/OWNER/GIT-Helix-Processor/dispatches \
+#   gh api repos/OWNER/apim-apiops-controller/dispatches \
 #     -f event_type=helix-approval \
 #     -f client_payload='{"crq_id":"CRQ-xxx","status":"APPROVED","request_id":"REQ-xxx"}'
 #

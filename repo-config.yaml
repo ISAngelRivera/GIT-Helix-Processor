@@ -1,5 +1,5 @@
 # =============================================================================
-# GIT-Helix-Processor: Configuración de Subdominios
+# apim-apiops-controller: Configuración de Subdominios
 # =============================================================================
 #
 # Este archivo mapea subdominios de negocio a sus repositorios Git de destino.
@@ -25,14 +25,14 @@ subdominios:
   # Dominio: Finanzas y Pagos
   finanzas-pagos:
     description: "APIs del dominio de Finanzas y Pagos"
-    git_repo: "ISAngelRivera/Finanzas-Pagos"
+    git_repo: "ISAngelRivera/apim-domain-finanzas"
     owners:
       - "team-finanzas@company.com"
 
   # Dominio: Recursos Humanos
   rrhh-empleados:
     description: "APIs del dominio de RRHH y Empleados"
-    git_repo: "ISAngelRivera/RRHH-Empleados"
+    git_repo: "ISAngelRivera/apim-domain-rrhh"
     owners:
       - "team-rrhh@company.com"
 
